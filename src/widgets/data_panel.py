@@ -1,0 +1,82 @@
+"""实时数据数值显示面板：以网格形式展示最新一帧的所有数据通道值。"""
+
+from PySide6.QtWidgets import QWidget, QGridLayout, QGroupBox, QLabel, QVBoxLayout
+from PySide6.QtCore import Qt
+
+from data_buffer import DataBuffer
+
+
+class DataPanel(QWidget):
+    """实时数值显示面板。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._labels: dict[str, QLabel] = {}
+        self._last_frame_index: int = 0
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        group = QGroupBox("实时数据")
+        grid = QGridLayout()
+
+        # 表头
+        grid.addWidget(QLabel("<b></b>"), 0, 0)
+        grid.addWidget(QLabel("<b>电机 A</b>"), 0, 1, Qt.AlignCenter)
+        grid.addWidget(QLabel("<b>电机 B</b>"), 0, 2, Qt.AlignCenter)
+
+        # 数据行定义：(行标签, A的key, B的key)
+        rows = [
+            ("原始速度", "raw_speed_A", "raw_speed_B"),
+            ("滤波速度", "filtered_A", "filtered_B"),
+            ("目标速度", "target_A", "target_B"),
+            ("PWM 输出", "output_A", "output_B"),
+        ]
+
+        for row_idx, (label, key_a, key_b) in enumerate(rows, start=1):
+            grid.addWidget(QLabel(label), row_idx, 0)
+
+            lbl_a = QLabel("---")
+            lbl_a.setAlignment(Qt.AlignCenter)
+            lbl_a.setMinimumWidth(90)
+            grid.addWidget(lbl_a, row_idx, 1)
+            self._labels[key_a] = lbl_a
+
+            lbl_b = QLabel("---")
+            lbl_b.setAlignment(Qt.AlignCenter)
+            lbl_b.setMinimumWidth(90)
+            grid.addWidget(lbl_b, row_idx, 2)
+            self._labels[key_b] = lbl_b
+
+        # 帧率行
+        grid.addWidget(QLabel("帧率"), 5, 0)
+        self._fps_label = QLabel("---")
+        self._fps_label.setAlignment(Qt.AlignCenter)
+        grid.addWidget(self._fps_label, 5, 1, 1, 2)
+
+        group.setLayout(grid)
+        layout.addWidget(group)
+
+    def refresh(self, buffer: DataBuffer) -> None:
+        """从 DataBuffer 读取最新帧并更新显示。由主窗口 33ms 定时器调用。"""
+        frame = buffer.get_latest()
+        if frame is None:
+            return
+
+        # 更新数值标签
+        for key in ('raw_speed_A', 'raw_speed_B', 'filtered_A', 'filtered_B',
+                     'target_A', 'target_B'):
+            self._labels[key].setText(f"{getattr(frame, key):.4f}")
+        self._labels['output_A'].setText(str(frame.output_A))
+        self._labels['output_B'].setText(str(frame.output_B))
+
+        # 估算帧率：基于帧计数差
+        current_index = buffer.frame_index
+        delta = current_index - self._last_frame_index
+        # 定时器约 33ms 调用一次，delta / 0.033 ≈ 帧率
+        if delta > 0:
+            fps = delta / 0.033
+            self._fps_label.setText(f"{fps:.0f} Hz")
+        self._last_frame_index = current_index
