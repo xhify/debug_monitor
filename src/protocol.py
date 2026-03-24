@@ -8,59 +8,56 @@
 import struct
 from dataclasses import dataclass
 
-# ─── 帧头 ───────────────────────────────────────────────
 HEADER1 = 0xAA
 HEADER2 = 0x55
 
-# ─── TX 帧类型 ID ───────────────────────────────────────
-FRAME_ID_DATA = 0x01   # 数据帧（32字节，100Hz）
-FRAME_ID_PARAM = 0x02  # 参数帧（40字节，按需）
+FRAME_ID_DATA = 0x01
+FRAME_ID_PARAM = 0x02
 
-# ─── TX 帧长度 ──────────────────────────────────────────
-DATA_FRAME_LEN = 32
+DATA_FRAME_LEN = 40
 PARAM_FRAME_LEN = 40
 
-# ─── RX 命令 ID ─────────────────────────────────────────
-CMD_SET_PID_BOTH = 0x10    # 两轮同步设置 PID
-CMD_SET_PID_A = 0x11       # 仅设置电机 A PID
-CMD_SET_PID_B = 0x12       # 仅设置电机 B PID
-CMD_SET_RC_SPEED = 0x20    # 设置遥控速度限制
-CMD_SET_MAX_SPEED = 0x21   # 设置最大速度限制
-CMD_SET_SMOOTH_STEP = 0x22 # 设置电机加速平滑步进
-CMD_QUERY_PARAMS = 0x30    # 查询当前参数
+CMD_SET_PID_BOTH = 0x10
+CMD_SET_PID_A = 0x11
+CMD_SET_PID_B = 0x12
+CMD_SET_RC_SPEED = 0x20
+CMD_SET_MAX_SPEED = 0x21
+CMD_SET_SMOOTH_STEP = 0x22
+CMD_QUERY_PARAMS = 0x30
 
-# ─── struct 格式串（小端序）──────────────────────────────
-# 数据帧 payload：6 个 float + 2 个 int16，从偏移 3 开始
-_DATA_FMT = '<6f2h'
-# 参数帧 payload：9 个 float，从偏移 3 开始
+_DATA_FMT = '<8f2h'
 _PARAM_FMT = '<9f'
 
 
 @dataclass(slots=True)
 class DataFrame:
-    """TX 数据帧 (0x01) — 32 字节"""
-    raw_speed_A: float    # 电机A T法原始编码器速度 (m/s)
-    raw_speed_B: float    # 电机B T法原始编码器速度 (m/s)
-    filtered_A: float     # 电机A Kalman滤波后速度 (m/s)
-    filtered_B: float     # 电机B Kalman滤波后速度 (m/s)
-    target_A: float       # 电机A 目标速度 (m/s)
-    target_B: float       # 电机B 目标速度 (m/s)
-    output_A: int         # 电机A PID输出 (PWM值, int16)
-    output_B: int         # 电机B PID输出 (PWM值, int16)
+    """TX 数据帧 (0x01) — 40 字节"""
+
+    t_raw_A: float
+    t_raw_B: float
+    m_raw_A: float
+    m_raw_B: float
+    final_A: float
+    final_B: float
+    target_A: float
+    target_B: float
+    output_A: int
+    output_B: int
 
 
 @dataclass(slots=True)
 class ParamFrame:
     """TX 参数帧 (0x02) — 40 字节"""
-    A_kp: float           # 电机A 比例增益
-    A_ki: float           # 电机A 积分增益
-    A_kd: float           # 电机A 微分增益
-    B_kp: float           # 电机B 比例增益
-    B_ki: float           # 电机B 积分增益
-    B_kd: float           # 电机B 微分增益
-    rc_speed: float       # 遥控速度限制
-    limt_max_speed: float # 最大速度限制 (m/s)
-    smooth_MotorStep: float  # 电机加速平滑步进
+
+    A_kp: float
+    A_ki: float
+    A_kd: float
+    B_kp: float
+    B_ki: float
+    B_kd: float
+    rc_speed: float
+    limt_max_speed: float
+    smooth_MotorStep: float
 
 
 def compute_xor_checksum(data: bytes | bytearray) -> int:
@@ -72,40 +69,29 @@ def compute_xor_checksum(data: bytes | bytearray) -> int:
 
 
 def parse_data_frame(raw: bytes | bytearray) -> DataFrame | None:
-    """
-    解析 32 字节 TX 数据帧。
-    校验通过返回 DataFrame，否则返回 None。
-    """
+    """解析 40 字节 TX 数据帧。"""
     if len(raw) != DATA_FRAME_LEN:
         return None
     if raw[0] != HEADER1 or raw[1] != HEADER2 or raw[2] != FRAME_ID_DATA:
         return None
-    if compute_xor_checksum(raw[:31]) != raw[31]:
+    if compute_xor_checksum(raw[:39]) != raw[39]:
         return None
-    values = struct.unpack_from(_DATA_FMT, raw, 3)
-    return DataFrame(*values)
+    return DataFrame(*struct.unpack_from(_DATA_FMT, raw, 3))
 
 
 def parse_param_frame(raw: bytes | bytearray) -> ParamFrame | None:
-    """
-    解析 40 字节 TX 参数帧。
-    校验通过返回 ParamFrame，否则返回 None。
-    """
+    """解析 40 字节 TX 参数帧。"""
     if len(raw) != PARAM_FRAME_LEN:
         return None
     if raw[0] != HEADER1 or raw[1] != HEADER2 or raw[2] != FRAME_ID_PARAM:
         return None
     if compute_xor_checksum(raw[:39]) != raw[39]:
         return None
-    values = struct.unpack_from(_PARAM_FMT, raw, 3)
-    return ParamFrame(*values)
+    return ParamFrame(*struct.unpack_from(_PARAM_FMT, raw, 3))
 
 
 def build_command(cmd_id: int, payload: bytes = b'') -> bytes:
-    """
-    构建 RX 命令帧。
-    格式：[0xAA, 0x55, CmdID, Length, Payload..., Checksum]
-    """
+    """构建 RX 命令帧。"""
     frame = bytes([HEADER1, HEADER2, cmd_id, len(payload)]) + payload
     checksum = compute_xor_checksum(frame)
     return frame + bytes([checksum])
@@ -113,14 +99,12 @@ def build_command(cmd_id: int, payload: bytes = b'') -> bytes:
 
 def build_pid_command(cmd_id: int, kp: float, ki: float, kd: float) -> bytes:
     """构建设置 PID 命令（cmd_id: 0x10/0x11/0x12）"""
-    payload = struct.pack('<3f', kp, ki, kd)
-    return build_command(cmd_id, payload)
+    return build_command(cmd_id, struct.pack('<3f', kp, ki, kd))
 
 
 def build_float_command(cmd_id: int, value: float) -> bytes:
     """构建设置单 float 值命令（cmd_id: 0x20/0x21/0x22）"""
-    payload = struct.pack('<f', value)
-    return build_command(cmd_id, payload)
+    return build_command(cmd_id, struct.pack('<f', value))
 
 
 def build_query_command() -> bytes:

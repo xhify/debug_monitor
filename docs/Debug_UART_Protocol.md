@@ -19,7 +19,7 @@
 调试串口模块通过 UART1 + DMA 实现实时数据流输出和命令接收，用于电机调试和参数调优。
 
 **通信方向：**
-- **TX（Robot → PC）：** 100Hz 实时数据帧（编码器速度、目标速度、PID 输出）+ 按需参数回复帧
+- **TX（Robot → PC）：** 100Hz 实时数据帧（T法原始速度、M法原始速度、融合后速度、目标速度、PID 输出）+ 按需参数回复帧
 - **RX（PC → Robot）：** 命令帧（设置 PID、速度限制等参数，查询当前参数）
 
 **关键特性：**
@@ -79,7 +79,7 @@
 
 ## 4. TX 数据帧（0x01）
 
-**总长度：** 32 字节
+**总长度：** 40 字节
 **发送频率：** 100 Hz（由 Balance_task 调用）
 **FrameID：** `0x01`
 
@@ -90,17 +90,21 @@
 | 0 | 1 | uint8 | header1 | 固定 `0xAA` |
 | 1 | 1 | uint8 | header2 | 固定 `0x55` |
 | 2 | 1 | uint8 | frame_id | 固定 `0x01` |
-| 3-6 | 4 | float | raw_speed_A | 电机A T法原始编码器速度 (m/s) |
-| 7-10 | 4 | float | raw_speed_B | 电机B T法原始编码器速度 (m/s) |
-| 11-14 | 4 | float | filtered_A | 电机A Kalman滤波后速度 (m/s) |
-| 15-18 | 4 | float | filtered_B | 电机B Kalman滤波后速度 (m/s) |
-| 19-22 | 4 | float | target_A | 电机A 目标速度 (m/s) |
-| 23-26 | 4 | float | target_B | 电机B 目标速度 (m/s) |
-| 27-28 | 2 | int16 | output_A | 电机A PID输出 (PWM值) |
-| 29-30 | 2 | int16 | output_B | 电机B PID输出 (PWM值) |
-| 31 | 1 | uint8 | checksum | XOR(bytes 0..30) |
+| 3-6 | 4 | float | t_raw_A | 电机A T法原始速度 (m/s) |
+| 7-10 | 4 | float | t_raw_B | 电机B T法原始速度 (m/s) |
+| 11-14 | 4 | float | m_raw_A | 电机A M法原始速度 (m/s) |
+| 15-18 | 4 | float | m_raw_B | 电机B M法原始速度 (m/s) |
+| 19-22 | 4 | float | final_A | 电机A 融合并滤波后的闭环反馈速度 (m/s) |
+| 23-26 | 4 | float | final_B | 电机B 融合并滤波后的闭环反馈速度 (m/s) |
+| 27-30 | 4 | float | target_A | 电机A 目标速度 (m/s) |
+| 31-34 | 4 | float | target_B | 电机B 目标速度 (m/s) |
+| 35-36 | 2 | int16 | output_A | 电机A PID输出 (PWM值) |
+| 37-38 | 2 | int16 | output_B | 电机B PID输出 (PWM值) |
+| 39 | 1 | uint8 | checksum | XOR(bytes 0..38) |
 
-> **注意：** `raw_speed_A/B` 仅在 AKM（阿克曼）底盘构建时有效，其他底盘类型固定为 `0.0f`。
+> **注意：**
+> - `t_raw_A/B`、`m_raw_A/B` 仅在 AKM（阿克曼）底盘构建时有效，其他底盘类型固定为 `0.0f`。
+> - `final_A/B` 为当前闭环实际使用的速度反馈，已包含 T/M 融合与一阶 Kalman 平滑。
 
 ---
 
@@ -144,15 +148,20 @@
 ### 接收状态机
 
 ```
-WAIT_HEADER1 → (0xAA) → WAIT_HEADER2 → (0x55) → WAIT_CMD → WAIT_LEN
-    → Length=0: WAIT_CHECKSUM
-    → Length>12: 丢弃,回到WAIT_HEADER1
-    → 其他: WAIT_PAYLOAD → 收齐Length字节 → WAIT_CHECKSUM
-        → 校验通过: 执行命令
-        → 校验失败: 静默丢弃
+WAIT_HEADER1 → (0xAA) → WAIT_HEADER2
+    → (0x55): WAIT_CMD → WAIT_LEN
+        → Length=0: WAIT_CHECKSUM
+        → Length>24: 丢弃,回到WAIT_HEADER1
+        → 其他: WAIT_PAYLOAD → 收齐Length字节 → WAIT_CHECKSUM
+            → 校验通过: 执行命令
+            → 校验失败: 静默丢弃
+    → (0xAA): 留在WAIT_HEADER2 (帧头重评估,避免丢失紧跟的有效帧)
+    → 其他: 回到WAIT_HEADER1
+
+超时: 约50ms (5个Balance_task周期) 无新字节时,自动复位到WAIT_HEADER1
 ```
 
-**最大 Payload 长度：** 12 字节（3 个 float）
+**最大 Payload 长度：** 24 字节（`DEBUG_RX_BUF_LEN`，当前最长命令为 12 字节）
 
 ---
 
@@ -242,7 +251,7 @@ for byte in frame[0 .. N-2]:
 frame[N-1] = checksum
 ```
 
-- **TX 数据帧：** XOR(bytes 0..30)，存入 byte[31]
+- **TX 数据帧：** XOR(bytes 0..38)，存入 byte[39]
 - **TX 参数帧：** XOR(bytes 0..38)，存入 byte[39]
 - **RX 命令帧：** XOR(bytes 0..3+Length)，与接收的 checksum 字节比较
 
@@ -252,10 +261,12 @@ frame[N-1] = checksum
 
 1. **非阻塞发送：** DMA 忙时当前帧被丢弃，不排队缓冲，保证发送的始终是最新数据
 2. **参数不持久化：** 通过命令修改的参数仅运行时有效，断电后恢复为初始值
-3. **PID 命令无范围限制：** 固件不对 Kp/Ki/Kd 做范围校验，上位机需自行确保合理值
+3. **PID 参数校验：** 固件对 Kp/Ki/Kd 做范围校验（`0 ≤ val ≤ 50000`），NaN/Inf 及超出范围的值会被静默拒绝，整条命令丢弃
 4. **参数帧优先：** 有参数回复请求时，该周期会发送参数帧替代数据帧（不会同时发送两帧）
-5. **底盘差异：** 数据帧中 `raw_speed_A/B` 字段仅 AKM 底盘有效，其他底盘类型为 0
-6. **RX Payload 上限：** 最大 12 字节，超出长度的帧会被静默丢弃
+5. **底盘差异：** 数据帧中 `t_raw_A/B`、`m_raw_A/B` 字段仅 AKM 底盘有效，其他底盘类型为 0
+6. **AKM 混合测速：** AKM 车型的 `final_A/B` 为低速 T 法、中高速 M 法和过渡区融合后的最终反馈，不再等同于单一 T 法输出
+7. **RX Payload 上限：** 最大 24 字节（`DEBUG_RX_BUF_LEN`），超出长度的帧会被静默丢弃
+8. **RX 超时恢复：** 状态机在约 50ms（5 个 Balance_task 周期）内未收到新字节时自动复位，防止卡在半帧状态
 
 ---
 

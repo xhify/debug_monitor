@@ -182,7 +182,11 @@ class MainWindow(QMainWindow):
             self._status_label.setText("正在记录...")
         else:
             # 停止记录，弹出保存对话框
-            default_name = f"debug_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            kp, ki, kd = self._command_panel.current_pid_values_int()
+            default_name = (
+                f"debug_data_kp{kp}_ki{ki}_kd{kd}_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            )
             filepath, _ = QFileDialog.getSaveFileName(
                 self, "保存记录数据", default_name, "CSV 文件 (*.csv)"
             )

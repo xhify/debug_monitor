@@ -16,25 +16,25 @@ import numpy as np
 
 from protocol import DataFrame
 
-# 环形缓冲区容量：3000 个采样点 ≈ 30 秒 @100Hz
 CAPACITY = 3000
 
-# 数据通道列索引
-COL_RAW_A = 0
-COL_RAW_B = 1
-COL_FILT_A = 2
-COL_FILT_B = 3
-COL_TGT_A = 4
-COL_TGT_B = 5
-COL_OUT_A = 6
-COL_OUT_B = 7
-NUM_COLS = 8
+COL_T_RAW_A = 0
+COL_T_RAW_B = 1
+COL_M_RAW_A = 2
+COL_M_RAW_B = 3
+COL_FINAL_A = 4
+COL_FINAL_B = 5
+COL_TGT_A = 6
+COL_TGT_B = 7
+COL_OUT_A = 8
+COL_OUT_B = 9
+NUM_COLS = 10
 
-# CSV 表头
 CSV_HEADER = [
     'frame_index', 'time_s',
-    'raw_speed_a', 'raw_speed_b',
-    'filtered_a', 'filtered_b',
+    't_raw_a', 't_raw_b',
+    'm_raw_a', 'm_raw_b',
+    'final_a', 'final_b',
     'target_a', 'target_b',
     'output_a', 'output_b',
 ]
@@ -46,25 +46,23 @@ class DataBuffer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._data = np.zeros((CAPACITY, NUM_COLS), dtype=np.float64)
-        self._write_idx: int = 0    # 下一个写入位置（对 CAPACITY 取模）
-        self._count: int = 0        # 已写入的有效样本数（上限 CAPACITY）
-        self._frame_index: int = 0  # 全局帧计数器（持续自增，不回绕）
-        self._latest: DataFrame | None = None  # 最新一帧原始数据
-
-        # CSV 记录相关（内存缓存模式，停止时一次性写入文件）
+        self._write_idx: int = 0
+        self._count: int = 0
+        self._frame_index: int = 0
+        self._latest: DataFrame | None = None
         self._recording: bool = False
         self._csv_buffer: list[list] = []
-
-    # ─── 写入（子线程调用）────────────────────────────────
 
     def append(self, frame: DataFrame) -> None:
         """将一帧数据写入环形缓冲区。由子线程调用，加锁保护。"""
         with self._lock:
             idx = self._write_idx % CAPACITY
-            self._data[idx, COL_RAW_A] = frame.raw_speed_A
-            self._data[idx, COL_RAW_B] = frame.raw_speed_B
-            self._data[idx, COL_FILT_A] = frame.filtered_A
-            self._data[idx, COL_FILT_B] = frame.filtered_B
+            self._data[idx, COL_T_RAW_A] = frame.t_raw_A
+            self._data[idx, COL_T_RAW_B] = frame.t_raw_B
+            self._data[idx, COL_M_RAW_A] = frame.m_raw_A
+            self._data[idx, COL_M_RAW_B] = frame.m_raw_B
+            self._data[idx, COL_FINAL_A] = frame.final_A
+            self._data[idx, COL_FINAL_B] = frame.final_B
             self._data[idx, COL_TGT_A] = frame.target_A
             self._data[idx, COL_TGT_B] = frame.target_B
             self._data[idx, COL_OUT_A] = frame.output_A
@@ -76,25 +74,21 @@ class DataBuffer:
             self._frame_index += 1
             self._latest = frame
 
-            # CSV 记录（内存缓存）
             if self._recording:
                 time_s = (self._frame_index - 1) * 0.01
                 self._csv_buffer.append([
                     self._frame_index - 1, f'{time_s:.2f}',
-                    frame.raw_speed_A, frame.raw_speed_B,
-                    frame.filtered_A, frame.filtered_B,
+                    frame.t_raw_A, frame.t_raw_B,
+                    frame.m_raw_A, frame.m_raw_B,
+                    frame.final_A, frame.final_B,
                     frame.target_A, frame.target_B,
                     frame.output_A, frame.output_B,
                 ])
 
-    # ─── 读取（主线程调用）────────────────────────────────
-
     def get_snapshot(self) -> tuple[np.ndarray, np.ndarray]:
         """
         获取当前缓冲区的有序快照。
-        返回 (time_array, data_array)：
-          - time_array: shape (n,)，单位秒，基于 frame_index × 0.01
-          - data_array: shape (n, 8)，8个数据通道
+        返回 (time_array, data_array)。
         """
         with self._lock:
             n = self._count
@@ -102,20 +96,14 @@ class DataBuffer:
                 return np.array([]), np.zeros((0, NUM_COLS))
 
             if n < CAPACITY:
-                # 缓冲区未满，直接切片
                 data = self._data[:n].copy()
             else:
-                # 缓冲区已满，需重排使最旧数据在前
                 start = self._write_idx % CAPACITY
-                data = np.concatenate(
-                    [self._data[start:], self._data[:start]], axis=0
-                )
+                data = np.concatenate([self._data[start:], self._data[:start]], axis=0)
 
-            # 时间轴：基于全局帧计数推算理论时间
             end_index = self._frame_index
             start_index = end_index - n
             time_array = np.arange(start_index, end_index, dtype=np.float64) * 0.01
-
             return time_array, data
 
     def get_latest(self) -> DataFrame | None:
@@ -125,10 +113,7 @@ class DataBuffer:
 
     @property
     def frame_index(self) -> int:
-        """当前全局帧计数（无锁读取，仅用于状态栏显示）。"""
         return self._frame_index
-
-    # ─── 清空 ─────────────────────────────────────────────
 
     def clear(self) -> None:
         """清空缓冲区数据。"""
@@ -138,8 +123,6 @@ class DataBuffer:
             self._count = 0
             self._frame_index = 0
             self._latest = None
-
-    # ─── CSV 记录（内存缓存模式）──────────────────────────
 
     def start_recording(self) -> None:
         """开始记录，数据缓存在内存中。"""
@@ -173,5 +156,4 @@ class DataBuffer:
 
     @property
     def csv_rows_written(self) -> int:
-        """当前内存缓存中的记录行数。"""
         return len(self._csv_buffer)
