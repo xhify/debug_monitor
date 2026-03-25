@@ -34,6 +34,7 @@ from protocol import (
     FRAME_ID_DATA, FRAME_ID_PARAM,
     CMD_SET_PID_BOTH, CMD_SET_PID_A, CMD_SET_PID_B,
     CMD_SET_RC_SPEED, CMD_SET_MAX_SPEED, CMD_SET_SMOOTH_STEP,
+    CMD_SET_TARGET_SPEED_AB, CMD_SET_TARGET_PWM_AB,
     CMD_QUERY_PARAMS,
     compute_xor_checksum,
 )
@@ -45,6 +46,8 @@ CMD_NAMES = {
     CMD_SET_RC_SPEED: "设置遥控速度",
     CMD_SET_MAX_SPEED: "设置最大速度",
     CMD_SET_SMOOTH_STEP: "设置平滑步进",
+    CMD_SET_TARGET_SPEED_AB: "设置A/B目标速度",
+    CMD_SET_TARGET_PWM_AB: "设置A/B目标PWM",
     CMD_QUERY_PARAMS: "查询参数",
 }
 
@@ -52,6 +55,14 @@ FAKE_PARAMS = {
     'A_kp': 80.0, 'A_ki': 0.6, 'A_kd': 20.0,
     'B_kp': 80.0, 'B_ki': 0.6, 'B_kd': 20.0,
     'rc_speed': 100.0, 'limt_max_speed': 0.8, 'smooth_MotorStep': 0.02,
+}
+
+CONTROL_STATE = {
+    'mode': 'SPEED',
+    'target_a': 0.6,
+    'target_b': 0.6,
+    'pwm_a': 300,
+    'pwm_b': 300,
 }
 
 
@@ -127,14 +138,27 @@ def parse_rx_commands(data: bytes) -> bool:
                     FAKE_PARAMS['B_kd'] = kd
                 print(f"  ← 收到命令: {name} (Kp={kp:.4f}, Ki={ki:.4f}, Kd={kd:.4f})")
             elif length == 4:
-                value, = struct.unpack('<f', payload)
-                if cmd_id == CMD_SET_RC_SPEED:
-                    FAKE_PARAMS['rc_speed'] = value
-                elif cmd_id == CMD_SET_MAX_SPEED:
-                    FAKE_PARAMS['limt_max_speed'] = value
-                elif cmd_id == CMD_SET_SMOOTH_STEP:
-                    FAKE_PARAMS['smooth_MotorStep'] = value
-                print(f"  ← 收到命令: {name} (值={value:.4f})")
+                if cmd_id == CMD_SET_TARGET_PWM_AB:
+                    pwm_a, pwm_b = struct.unpack('<2h', payload)
+                    CONTROL_STATE['mode'] = 'PWM'
+                    CONTROL_STATE['pwm_a'] = pwm_a
+                    CONTROL_STATE['pwm_b'] = pwm_b
+                    print(f"  ← 收到命令: {name} (A={pwm_a}, B={pwm_b})")
+                else:
+                    value, = struct.unpack('<f', payload)
+                    if cmd_id == CMD_SET_RC_SPEED:
+                        FAKE_PARAMS['rc_speed'] = value
+                    elif cmd_id == CMD_SET_MAX_SPEED:
+                        FAKE_PARAMS['limt_max_speed'] = value
+                    elif cmd_id == CMD_SET_SMOOTH_STEP:
+                        FAKE_PARAMS['smooth_MotorStep'] = value
+                    print(f"  ← 收到命令: {name} (值={value:.4f})")
+            elif length == 8 and cmd_id == CMD_SET_TARGET_SPEED_AB:
+                speed_a, speed_b = struct.unpack('<2f', payload)
+                CONTROL_STATE['mode'] = 'SPEED'
+                CONTROL_STATE['target_a'] = speed_a
+                CONTROL_STATE['target_b'] = speed_b
+                print(f"  ← 收到命令: {name} (A={speed_a:.4f}, B={speed_b:.4f})")
             else:
                 print(f"  ← 收到命令: {name}")
         else:
@@ -160,17 +184,29 @@ def generate_data(t: float) -> tuple:
     m_raw_b = final_b + random.gauss(0, 0.06)
 
     square_period = 5.0
-    if (t % square_period) < (square_period / 2):
-        tgt_a = 0.6
-        tgt_b = 0.6
+    if CONTROL_STATE['mode'] == 'SPEED':
+        tgt_a = CONTROL_STATE['target_a']
+        tgt_b = CONTROL_STATE['target_b']
+        if (t % square_period) >= (square_period / 2):
+            tgt_a *= 0.5
+            tgt_b *= 0.5
+        out_a = int(tgt_a * 500 + (final_a - tgt_a) * 200)
+        out_b = int(tgt_b * 500 + (final_b - tgt_b) * 200)
     else:
-        tgt_a = 0.3
-        tgt_b = 0.3
+        tgt_a = float(CONTROL_STATE['pwm_a'])
+        tgt_b = float(CONTROL_STATE['pwm_b'])
+        if (t % square_period) >= (square_period / 2):
+            tgt_a = 0.0
+            tgt_b = 0.0
+        out_a = int(tgt_a)
+        out_b = int(tgt_b)
 
-    out_a = int(tgt_a * 500 + (final_a - tgt_a) * 200)
-    out_b = int(tgt_b * 500 + (final_b - tgt_b) * 200)
-    out_a = max(-1000, min(1000, out_a))
-    out_b = max(-1000, min(1000, out_b))
+    if CONTROL_STATE['mode'] == 'PWM':
+        out_a = max(-16800, min(16800, out_a))
+        out_b = max(-16800, min(16800, out_b))
+    else:
+        out_a = max(-1000, min(1000, out_a))
+        out_b = max(-1000, min(1000, out_b))
 
     return t_raw_a, t_raw_b, m_raw_a, m_raw_b, final_a, final_b, tgt_a, tgt_b, out_a, out_b
 

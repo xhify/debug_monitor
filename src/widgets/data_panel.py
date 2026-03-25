@@ -1,5 +1,8 @@
 """实时数据数值显示面板：以网格形式展示最新一帧的所有数据通道值。"""
 
+from collections import deque
+from time import perf_counter
+
 from PySide6.QtWidgets import QWidget, QGridLayout, QGroupBox, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt
 
@@ -12,7 +15,7 @@ class DataPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._labels: dict[str, QLabel] = {}
-        self._last_frame_index: int = 0
+        self._fps_samples: deque[tuple[float, int]] = deque()
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -73,8 +76,16 @@ class DataPanel(QWidget):
         self._labels['output_B'].setText(str(frame.output_B))
 
         current_index = buffer.frame_index
-        delta = current_index - self._last_frame_index
-        if delta > 0:
-            fps = delta / 0.033
-            self._fps_label.setText(f"{fps:.0f} Hz")
-        self._last_frame_index = current_index
+        now = perf_counter()
+        self._fps_samples.append((now, current_index))
+
+        cutoff = now - 1.0
+        while len(self._fps_samples) > 1 and self._fps_samples[0][0] < cutoff:
+            self._fps_samples.popleft()
+
+        if len(self._fps_samples) >= 2:
+            start_time, start_index = self._fps_samples[0]
+            elapsed = now - start_time
+            if elapsed > 0:
+                fps = (current_index - start_index) / elapsed
+                self._fps_label.setText(f"{fps:.0f} Hz")

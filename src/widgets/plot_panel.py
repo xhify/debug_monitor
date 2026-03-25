@@ -138,7 +138,7 @@ class PlotPanel(QWidget):
         self._speed_plot.setXRange(0, 1)
         self._speed_plot.setYRange(-1, 1)
         self._pwm_plot.setXRange(0, 1)
-        self._pwm_plot.setYRange(-100, 100)
+        self._pwm_plot.setYRange(-18000, 18000)
         self._speed_plot.enableAutoRange()
         self._pwm_plot.enableAutoRange()
 

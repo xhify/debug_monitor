@@ -23,6 +23,8 @@ CMD_SET_PID_B = 0x12
 CMD_SET_RC_SPEED = 0x20
 CMD_SET_MAX_SPEED = 0x21
 CMD_SET_SMOOTH_STEP = 0x22
+CMD_SET_TARGET_SPEED_AB = 0x23
+CMD_SET_TARGET_PWM_AB = 0x24
 CMD_QUERY_PARAMS = 0x30
 
 _DATA_FMT = '<8f2h'
@@ -105,6 +107,16 @@ def build_pid_command(cmd_id: int, kp: float, ki: float, kd: float) -> bytes:
 def build_float_command(cmd_id: int, value: float) -> bytes:
     """构建设置单 float 值命令（cmd_id: 0x20/0x21/0x22）"""
     return build_command(cmd_id, struct.pack('<f', value))
+
+
+def build_dual_float_command(cmd_id: int, value_a: float, value_b: float) -> bytes:
+    """构建双 float 命令（cmd_id: 0x23）"""
+    return build_command(cmd_id, struct.pack('<2f', value_a, value_b))
+
+
+def build_dual_int16_command(cmd_id: int, value_a: int, value_b: int) -> bytes:
+    """构建双 int16 命令（cmd_id: 0x24）"""
+    return build_command(cmd_id, struct.pack('<2h', value_a, value_b))
 
 
 def build_query_command() -> bytes:
