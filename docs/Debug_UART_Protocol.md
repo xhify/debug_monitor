@@ -11,6 +11,7 @@
 - [8. 校验算法](#8-校验算法)
 - [9. 注意事项](#9-注意事项)
 - [10. 源码位置索引](#10-源码位置索引)
+- [11. DOB 调参说明](#11-dob-调参说明)
 
 ---
 
@@ -19,7 +20,7 @@
 调试串口模块通过 UART1 + DMA 实现实时数据流输出和命令接收，用于电机调试和参数调优。
 
 **通信方向：**
-- **TX（Robot → PC）：** 100Hz 实时数据帧（T法原始速度、M法原始速度、融合后速度、当前目标、当前输出）+ 按需参数回复帧
+- **TX（Robot → PC）：** 100Hz 实时数据帧（T法原始速度、M法原始速度、融合后速度、当前目标、当前输出、DOB 扰动估计）+ 按需参数回复帧
 - **RX（PC → Robot）：** 命令帧（设置 PID、速度限制、USART1 目标速度、USART1 目标 PWM，查询当前参数）
 
 **关键特性：**
@@ -80,7 +81,7 @@
 
 ## 4. TX 数据帧（0x01）
 
-**总长度：** 40 字节
+**总长度：** 48 字节
 **发送频率：** 100 Hz（由 Balance_task 调用）
 **FrameID：** `0x01`
 
@@ -99,15 +100,18 @@
 | 23-26 | 4 | float | final_B | 电机B 融合并滤波后的闭环反馈速度 (m/s) |
 | 27-30 | 4 | float | target_A | 电机A 当前目标值 |
 | 31-34 | 4 | float | target_B | 电机B 当前目标值 |
-| 35-36 | 2 | int16 | output_A | 电机A 当前输出 PWM |
-| 37-38 | 2 | int16 | output_B | 电机B 当前输出 PWM |
-| 39 | 1 | uint8 | checksum | XOR(bytes 0..38) |
+| 35-36 | 2 | int16 | output_A | 电机A PI 原始输出 PWM（DOB 补偿前） |
+| 37-38 | 2 | int16 | output_B | 电机B PI 原始输出 PWM（DOB 补偿前） |
+| 39-42 | 4 | float | disturbance_A | 电机A DOB 扰动估计值（AKM only，其他底盘为 `0.0f`） |
+| 43-46 | 4 | float | disturbance_B | 电机B DOB 扰动估计值（AKM only，其他底盘为 `0.0f`） |
+| 47 | 1 | uint8 | checksum | XOR(bytes 0..46) |
 
 > **注意：**
-> - `t_raw_A/B`、`m_raw_A/B` 仅在 AKM（阿克曼）底盘构建时有效，其他底盘类型固定为 `0.0f`。
-> - `final_A/B` 为当前闭环实际使用的速度反馈，已包含 T/M 融合与一阶 Kalman 平滑。
-> - 在 `SPEED` 模式下，`target_A/B` 单位为 m/s，`output_A/B` 为 PI 计算后的 PWM 输出。
-> - 在 `PWM` 模式下，`target_A/B` 直接表示当前动作映射后的目标 PWM 值，`output_A/B` 为实际下发的 PWM 输出。
+> - `t_raw_A/B`、`m_raw_A/B`、`disturbance_A/B` 仅在 AKM（阿克曼）底盘构建时有效，其他底盘类型固定为 `0.0f`。
+> - `final_A/B` 为当前闭环实际使用的速度反馈，已包含 T/M 融合与 Alpha-Beta 滤波。
+> - `output_A/B` 为 PI 控制器的**原始累积输出**，即 DOB 补偿前的值；实际送到电机的 PWM = `output - disturbance × DOB_COMP_GAIN`（限幅后）。
+> - 在 `SPEED` 模式下，`target_A/B` 单位为 m/s。在 `PWM` 模式下，`target_A/B` 直接表示当前动作映射后的目标 PWM 值。
+> - `disturbance_A/B` 为扰动观测器（DOB）估计的未建模扰动（打滑、负载变化等），正值表示实际需要比理论更多 PWM 才能维持当前速度。停车时自动清零。
 
 ---
 
@@ -295,7 +299,7 @@ for byte in frame[0 .. N-2]:
 frame[N-1] = checksum
 ```
 
-- **TX 数据帧：** XOR(bytes 0..38)，存入 byte[39]
+- **TX 数据帧：** XOR(bytes 0..46)，存入 byte[47]
 - **TX 参数帧：** XOR(bytes 0..38)，存入 byte[39]
 - **RX 命令帧：** XOR(bytes 0..3+Length)，与接收的 checksum 字节比较
 
@@ -307,12 +311,14 @@ frame[N-1] = checksum
 2. **参数不持久化：** 通过命令修改的参数仅运行时有效，断电后恢复为初始值
 3. **PID 参数校验：** 固件对 Kp/Ki/Kd 做范围校验（`0 ≤ val ≤ 50000`），NaN/Inf 及超出范围的值会被静默拒绝，整条命令丢弃
 4. **参数帧优先：** 有参数回复请求时，该周期会发送参数帧替代数据帧（不会同时发送两帧）
-5. **底盘差异：** 数据帧中 `t_raw_A/B`、`m_raw_A/B` 字段仅 AKM 底盘有效，其他底盘类型为 0
+5. **底盘差异：** 数据帧中 `t_raw_A/B`、`m_raw_A/B`、`disturbance_A/B` 字段仅 AKM 底盘有效，其他底盘类型为 `0.0f`
 6. **AKM 混合测速：** AKM 车型的 `final_A/B` 为低速 T 法、中高速 M 法和过渡区融合后的最终反馈，不再等同于单一 T 法输出
+11. **DOB 扰动估计：** `disturbance_A/B` 为扰动观测器低通滤波输出（时间常数约 200ms）；用于验证 DOB 效果时，建议将 `output_A/B` 与 `disturbance_A/B` 对比观察，实际电机 PWM = `output - disturbance × 0.5`（`DOB_COMP_GAIN` 默认值）
+12. **协议版本变更：** 本版本数据帧由 40 字节扩展为 48 字节，旧版上位机解析工具需同步更新帧长度与校验字节偏移
 7. **RX Payload 上限：** 最大 24 字节（`DEBUG_RX_BUF_LEN`），超出长度的帧会被静默丢弃
 8. **RX 超时恢复：** 状态机在约 50ms（5 个 Balance_task 周期）内未收到新字节时自动复位，防止卡在半帧状态
 9. **无逐帧 ACK：** USART1 不为每条 RX 命令发送独立确认帧；上位机应通过周期性数据帧或查询参数帧观察执行结果
-10. **带宽估算：** 115200bps 下有效吞吐约 `11520B/s`；现有 `40B * 100Hz = 4000B/s`，新增目标控制命令按 `13B * 100Hz ≈ 1300B/s` 估算，总占用约 `5300B/s`，约为链路的 `46%`
+10. **带宽估算：** 115200bps 下有效吞吐约 `11520B/s`；现有 `48B * 100Hz = 4800B/s`，新增目标控制命令按 `13B * 100Hz ≈ 1300B/s` 估算，总占用约 `6100B/s`，约为链路的 `53%`
 
 ---
 
@@ -321,7 +327,37 @@ frame[N-1] = checksum
 | 文件 | 说明 |
 |------|------|
 | `HARDWARE/debug_uart.c` | 模块实现（DMA 初始化、帧组装、RX 状态机、命令执行） |
-| `HARDWARE/Inc/debug_uart.h` | 接口声明与协议常量定义 |
-| `BALANCE/balance_task.c` | TX 调用点（Balance_task 中 100Hz 调用 `Debug_SendDataFrame()`） |
+| `HARDWARE/Inc/debug_uart.h` | 接口声明与协议常量定义（`DEBUG_DATA_FRAME_LEN = 48`） |
+| `BALANCE/balance_task.c` | TX 调用点（Balance_task 中 100Hz 调用 `Debug_SendDataFrame()`）；DOB 常量及 `disturbance_a/b` 定义 |
 | `HARDWARE/uartx_callback.c` | RX 调用点（USART1 中断中调用 `Debug_ProcessRxByte()`） |
 | `USER/system.c` | 初始化调用（`Debug_UART_DMA_Init()`） |
+
+---
+
+## 11. DOB 调参说明
+
+扰动观测器（DOB）通过 `balance_task.c` 中的三个编译时常量控制，调参时直接修改后重新编译：
+
+| 常量 | 默认值 | 说明 |
+|------|--------|------|
+| `K_MOTOR_A` | `0.000148f` | 电机A 稳态增益 `(m/s)/PWM`，从标定数据 `0.4m/s @ 2694 PWM` 导出 |
+| `K_MOTOR_B` | `0.000131f` | 电机B 稳态增益 `(m/s)/PWM`，从标定数据 `0.4m/s @ 3050 PWM` 导出 |
+| `DOB_ALPHA` | `0.05f` | 扰动估计低通滤波系数，等效时间常数 `≈ (1/DOB_ALPHA) × 10ms = 200ms` |
+| `DOB_COMP_GAIN` | `0.5f` | 补偿增益，范围 `0.0~1.0`；`0` 表示完全禁用 DOB |
+
+### 推荐调参步骤
+
+1. 令 `DOB_COMP_GAIN = 0` 编译烧录，建立基线——记录此时 `output_A/B` 的振荡幅度
+2. 将 `DOB_COMP_GAIN` 调至 `0.3`，重新烧录，在恒速行驶时观察 `disturbance_A/B` 是否稳定收敛（绝对值 < `1000` 为正常范围）
+3. 逐步增大至 `0.5` → `0.7` → `1.0`，每次观察 `output_A/B` 振荡是否继续下降；若出现新的高频抖动则回退一档
+4. 若 `disturbance_A/B` 数值异常偏大（> `5000`），说明 `K_MOTOR_A/B` 标定偏差大，需重新标定电机增益
+
+### K_MOTOR 重标定方法
+
+在恒速直线行驶稳态时，从调试帧读取 `final_A`（稳态速度）和 `output_A`（稳态 PWM），则：
+
+```
+K_MOTOR_A = final_A / output_A
+```
+
+取 3~5 次平均值后更新常量。

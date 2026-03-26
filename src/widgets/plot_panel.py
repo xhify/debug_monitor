@@ -14,7 +14,7 @@ from data_buffer import DataBuffer
 from data_buffer import (
     COL_T_RAW_A, COL_T_RAW_B, COL_M_RAW_A, COL_M_RAW_B,
     COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B,
-    COL_OUT_A, COL_OUT_B,
+    COL_OUT_A, COL_OUT_B, COL_DIST_A, COL_DIST_B,
 )
 
 
@@ -73,6 +73,10 @@ class PlotPanel(QWidget):
             pen=pg.mkPen('#ff7043', width=2), name='PWM A')
         self._curves['out_B'] = self._pwm_plot.plot(
             pen=pg.mkPen('#7e57c2', width=2), name='PWM B')
+        self._curves['dist_A'] = self._pwm_plot.plot(
+            pen=pg.mkPen('#e74c3c', width=1.5, style=Qt.DashLine), name='扰动A')
+        self._curves['dist_B'] = self._pwm_plot.plot(
+            pen=pg.mkPen('#8e44ad', width=1.5, style=Qt.DashLine), name='扰动B')
 
         splitter.addWidget(self._pwm_plot)
         splitter.setStretchFactor(0, 2)
@@ -131,6 +135,8 @@ class PlotPanel(QWidget):
         self._curves['tgt_B'].setData(time_arr, data[:, COL_TGT_B])
         self._curves['out_A'].setData(time_arr, data[:, COL_OUT_A])
         self._curves['out_B'].setData(time_arr, data[:, COL_OUT_B])
+        self._curves['dist_A'].setData(time_arr, data[:, COL_DIST_A])
+        self._curves['dist_B'].setData(time_arr, data[:, COL_DIST_B])
 
     def reset(self) -> None:
         for curve in self._curves.values():
