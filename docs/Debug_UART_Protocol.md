@@ -80,7 +80,7 @@
 
 ## 4. TX 数据帧（0x01）
 
-**总长度：** 40 字节
+**总长度：** 48 字节
 **发送频率：** 100 Hz（由 Balance_task 调用）
 **FrameID：** `0x01`
 
@@ -101,13 +101,16 @@
 | 31-34 | 4 | float | target_B | 电机B 当前目标值 |
 | 35-36 | 2 | int16 | output_A | 电机A 当前输出 PWM |
 | 37-38 | 2 | int16 | output_B | 电机B 当前输出 PWM |
-| 39 | 1 | uint8 | checksum | XOR(bytes 0..38) |
+| 39-42 | 4 | float | afc_output_A | 电机A AFC 增量输出 PWM |
+| 43-46 | 4 | float | afc_output_B | 电机B AFC 增量输出 PWM |
+| 47 | 1 | uint8 | checksum | XOR(bytes 0..46) |
 
 > **注意：**
 > - `t_raw_A/B`、`m_raw_A/B` 仅在 AKM（阿克曼）底盘构建时有效，其他底盘类型固定为 `0.0f`。
 > - `final_A/B` 为当前闭环实际使用的速度反馈，已包含 T/M 融合与一阶 Kalman 平滑。
-> - 在 `SPEED` 模式下，`target_A/B` 单位为 m/s，`output_A/B` 为 PI 计算后的 PWM 输出。
-> - 在 `PWM` 模式下，`target_A/B` 直接表示当前动作映射后的目标 PWM 值，`output_A/B` 为实际下发的 PWM 输出。
+> - `afc_output_A/B` 为 AFC 单独输出的增量 PWM，用于观察学习结果，不包含 PI 本体输出。
+> - 在 `SPEED` 模式下，`target_A/B` 单位为 m/s，`output_A/B` 为 PI 与 AFC 叠加后的最终 PWM 输出。
+> - 在 `PWM` 模式下，`target_A/B` 直接表示当前动作映射后的目标 PWM 值，`output_A/B` 为实际下发的 PWM 输出；`afc_output_A/B` 会复位为 `0.0f`。
 
 ---
 
@@ -295,7 +298,7 @@ for byte in frame[0 .. N-2]:
 frame[N-1] = checksum
 ```
 
-- **TX 数据帧：** XOR(bytes 0..38)，存入 byte[39]
+- **TX 数据帧：** XOR(bytes 0..46)，存入 byte[47]
 - **TX 参数帧：** XOR(bytes 0..38)，存入 byte[39]
 - **RX 命令帧：** XOR(bytes 0..3+Length)，与接收的 checksum 字节比较
 
@@ -312,7 +315,8 @@ frame[N-1] = checksum
 7. **RX Payload 上限：** 最大 24 字节（`DEBUG_RX_BUF_LEN`），超出长度的帧会被静默丢弃
 8. **RX 超时恢复：** 状态机在约 50ms（5 个 Balance_task 周期）内未收到新字节时自动复位，防止卡在半帧状态
 9. **无逐帧 ACK：** USART1 不为每条 RX 命令发送独立确认帧；上位机应通过周期性数据帧或查询参数帧观察执行结果
-10. **带宽估算：** 115200bps 下有效吞吐约 `11520B/s`；现有 `40B * 100Hz = 4000B/s`，新增目标控制命令按 `13B * 100Hz ≈ 1300B/s` 估算，总占用约 `5300B/s`，约为链路的 `46%`
+10. **协议变更：** `0x01` 数据帧已扩展到 48 字节，上位机解析偏移与校验范围需要同步更新
+11. **带宽估算：** 115200bps 下有效吞吐约 `11520B/s`；现有 `48B * 100Hz = 4800B/s`，新增目标控制命令按 `13B * 100Hz ≈ 1300B/s` 估算，总占用约 `6100B/s`，约为链路的 `53%`
 
 ---
 

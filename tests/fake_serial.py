@@ -15,6 +15,7 @@
     - 融合反馈速度：T/M 加权结果
     - 目标速度：方波（周期 ~5 秒）
     - PWM 输出：与目标速度成比例
+    - AFC 输出：仅在 SPEED 模式下模拟增量 PWM
 """
 
 import argparse
@@ -77,15 +78,18 @@ def build_data_frame(
     tgt_b: float,
     out_a: int,
     out_b: int,
+    afc_a: float,
+    afc_b: float,
 ) -> bytes:
-    """构建 40 字节数据帧。"""
+    """构建 48 字节数据帧。"""
     payload = struct.pack(
-        '<8f2h',
+        '<8f2h2f',
         t_raw_a, t_raw_b,
         m_raw_a, m_raw_b,
         final_a, final_b,
         tgt_a, tgt_b,
         out_a, out_b,
+        afc_a, afc_b,
     )
     frame = bytes([HEADER1, HEADER2, FRAME_ID_DATA]) + payload
     return frame + bytes([compute_xor_checksum(frame)])
@@ -190,14 +194,18 @@ def generate_data(t: float) -> tuple:
         if (t % square_period) >= (square_period / 2):
             tgt_a *= 0.5
             tgt_b *= 0.5
-        out_a = int(tgt_a * 500 + (final_a - tgt_a) * 200)
-        out_b = int(tgt_b * 500 + (final_b - tgt_b) * 200)
+        afc_a = 80.0 * math.sin(2 * math.pi * 0.3 * t)
+        afc_b = 80.0 * math.sin(2 * math.pi * 0.3 * t + 0.4)
+        out_a = int(tgt_a * 500 + (final_a - tgt_a) * 200 + afc_a)
+        out_b = int(tgt_b * 500 + (final_b - tgt_b) * 200 + afc_b)
     else:
         tgt_a = float(CONTROL_STATE['pwm_a'])
         tgt_b = float(CONTROL_STATE['pwm_b'])
         if (t % square_period) >= (square_period / 2):
             tgt_a = 0.0
             tgt_b = 0.0
+        afc_a = 0.0
+        afc_b = 0.0
         out_a = int(tgt_a)
         out_b = int(tgt_b)
 
@@ -208,7 +216,14 @@ def generate_data(t: float) -> tuple:
         out_a = max(-1000, min(1000, out_a))
         out_b = max(-1000, min(1000, out_b))
 
-    return t_raw_a, t_raw_b, m_raw_a, m_raw_b, final_a, final_b, tgt_a, tgt_b, out_a, out_b
+    return (
+        t_raw_a, t_raw_b,
+        m_raw_a, m_raw_b,
+        final_a, final_b,
+        tgt_a, tgt_b,
+        out_a, out_b,
+        afc_a, afc_b,
+    )
 
 
 def run_tcp_server(host: str, port: int) -> None:

@@ -28,7 +28,9 @@ COL_TGT_A = 6
 COL_TGT_B = 7
 COL_OUT_A = 8
 COL_OUT_B = 9
-NUM_COLS = 10
+COL_AFC_A = 10
+COL_AFC_B = 11
+NUM_COLS = 12
 
 CSV_HEADER = [
     'frame_index', 'time_s',
@@ -37,6 +39,7 @@ CSV_HEADER = [
     'final_a', 'final_b',
     'target_a', 'target_b',
     'output_a', 'output_b',
+    'afc_output_a', 'afc_output_b',
 ]
 
 
@@ -67,6 +70,8 @@ class DataBuffer:
             self._data[idx, COL_TGT_B] = frame.target_B
             self._data[idx, COL_OUT_A] = frame.output_A
             self._data[idx, COL_OUT_B] = frame.output_B
+            self._data[idx, COL_AFC_A] = frame.afc_output_A
+            self._data[idx, COL_AFC_B] = frame.afc_output_B
 
             self._write_idx += 1
             if self._count < CAPACITY:
@@ -83,6 +88,7 @@ class DataBuffer:
                     frame.final_A, frame.final_B,
                     frame.target_A, frame.target_B,
                     frame.output_A, frame.output_B,
+                    frame.afc_output_A, frame.afc_output_B,
                 ])
 
     def get_snapshot(self) -> tuple[np.ndarray, np.ndarray]:

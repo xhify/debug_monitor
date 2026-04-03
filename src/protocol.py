@@ -14,7 +14,7 @@ HEADER2 = 0x55
 FRAME_ID_DATA = 0x01
 FRAME_ID_PARAM = 0x02
 
-DATA_FRAME_LEN = 40
+DATA_FRAME_LEN = 48
 PARAM_FRAME_LEN = 40
 
 CMD_SET_PID_BOTH = 0x10
@@ -27,13 +27,13 @@ CMD_SET_TARGET_SPEED_AB = 0x23
 CMD_SET_TARGET_PWM_AB = 0x24
 CMD_QUERY_PARAMS = 0x30
 
-_DATA_FMT = '<8f2h'
+_DATA_FMT = '<8f2h2f'
 _PARAM_FMT = '<9f'
 
 
 @dataclass(slots=True)
 class DataFrame:
-    """TX 数据帧 (0x01) — 40 字节"""
+    """TX 数据帧 (0x01) — 48 字节"""
 
     t_raw_A: float
     t_raw_B: float
@@ -45,6 +45,8 @@ class DataFrame:
     target_B: float
     output_A: int
     output_B: int
+    afc_output_A: float
+    afc_output_B: float
 
 
 @dataclass(slots=True)
@@ -71,12 +73,12 @@ def compute_xor_checksum(data: bytes | bytearray) -> int:
 
 
 def parse_data_frame(raw: bytes | bytearray) -> DataFrame | None:
-    """解析 40 字节 TX 数据帧。"""
+    """解析 48 字节 TX 数据帧。"""
     if len(raw) != DATA_FRAME_LEN:
         return None
     if raw[0] != HEADER1 or raw[1] != HEADER2 or raw[2] != FRAME_ID_DATA:
         return None
-    if compute_xor_checksum(raw[:39]) != raw[39]:
+    if compute_xor_checksum(raw[:47]) != raw[47]:
         return None
     return DataFrame(*struct.unpack_from(_DATA_FMT, raw, 3))
 

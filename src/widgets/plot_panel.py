@@ -1,5 +1,5 @@
 """
-实时绘图面板：速度图（8条曲线）+ PWM图（2条曲线），垂直堆叠，X轴联动。
+实时绘图面板：速度图（8条曲线）+ PWM图（4条曲线），垂直堆叠，X轴联动。
 
 性能优化：
 - setDownsampling(mode='peak')：缩放到全局时自动降采样
@@ -14,7 +14,7 @@ from data_buffer import DataBuffer
 from data_buffer import (
     COL_T_RAW_A, COL_T_RAW_B, COL_M_RAW_A, COL_M_RAW_B,
     COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B,
-    COL_OUT_A, COL_OUT_B,
+    COL_OUT_A, COL_OUT_B, COL_AFC_A, COL_AFC_B,
 )
 
 
@@ -73,6 +73,10 @@ class PlotPanel(QWidget):
             pen=pg.mkPen('#ff7043', width=2), name='PWM A')
         self._curves['out_B'] = self._pwm_plot.plot(
             pen=pg.mkPen('#7e57c2', width=2), name='PWM B')
+        self._curves['afc_A'] = self._pwm_plot.plot(
+            pen=pg.mkPen('#8e44ad', width=1.5, style=Qt.DashLine), name='AFC A')
+        self._curves['afc_B'] = self._pwm_plot.plot(
+            pen=pg.mkPen('#16a085', width=1.5, style=Qt.DashLine), name='AFC B')
 
         splitter.addWidget(self._pwm_plot)
         splitter.setStretchFactor(0, 2)
@@ -131,6 +135,8 @@ class PlotPanel(QWidget):
         self._curves['tgt_B'].setData(time_arr, data[:, COL_TGT_B])
         self._curves['out_A'].setData(time_arr, data[:, COL_OUT_A])
         self._curves['out_B'].setData(time_arr, data[:, COL_OUT_B])
+        self._curves['afc_A'].setData(time_arr, data[:, COL_AFC_A])
+        self._curves['afc_B'].setData(time_arr, data[:, COL_AFC_B])
 
     def reset(self) -> None:
         for curve in self._curves.values():

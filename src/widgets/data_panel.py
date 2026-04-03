@@ -35,6 +35,7 @@ class DataPanel(QWidget):
             ("融合反馈速度", "final_A", "final_B"),
             ("目标速度", "target_A", "target_B"),
             ("PWM 输出", "output_A", "output_B"),
+            ("AFC 输出", "afc_output_A", "afc_output_B"),
         ]
 
         for row_idx, (label, key_a, key_b) in enumerate(rows, start=1):
@@ -52,10 +53,10 @@ class DataPanel(QWidget):
             grid.addWidget(lbl_b, row_idx, 2)
             self._labels[key_b] = lbl_b
 
-        grid.addWidget(QLabel("帧率"), 6, 0)
+        grid.addWidget(QLabel("帧率"), 7, 0)
         self._fps_label = QLabel("---")
         self._fps_label.setAlignment(Qt.AlignCenter)
-        grid.addWidget(self._fps_label, 6, 1, 1, 2)
+        grid.addWidget(self._fps_label, 7, 1, 1, 2)
 
         group.setLayout(grid)
         layout.addWidget(group)
@@ -74,6 +75,8 @@ class DataPanel(QWidget):
             self._labels[key].setText(f"{getattr(frame, key):.4f}")
         self._labels['output_A'].setText(str(frame.output_A))
         self._labels['output_B'].setText(str(frame.output_B))
+        self._labels['afc_output_A'].setText(f"{frame.afc_output_A:.2f}")
+        self._labels['afc_output_B'].setText(f"{frame.afc_output_B:.2f}")
 
         current_index = buffer.frame_index
         now = perf_counter()
