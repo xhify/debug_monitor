@@ -1,20 +1,19 @@
 """
-线程安全的 numpy 环形缓冲区
+线程安全的 numpy 环形缓冲区。
 
 子线程（SerialWorker）通过 append() 写入数据，
 主线程通过 get_snapshot() / get_latest() 读取数据用于绘图和数值更新。
 所有公开方法均通过 threading.Lock 保证线程安全。
-
-CSV 记录：记录期间数据缓存在内存中，停止记录时一次性写入文件。
 """
 
-import csv
+from __future__ import annotations
+
 import threading
-from pathlib import Path
 
 import numpy as np
 
 from protocol import DataFrame
+from recording_session import RecordingSession
 
 CAPACITY = 3000
 
@@ -30,28 +29,18 @@ COL_OUT_A = 8
 COL_OUT_B = 9
 NUM_COLS = 10
 
-CSV_HEADER = [
-    'frame_index', 'time_s',
-    't_raw_a', 't_raw_b',
-    'm_raw_a', 'm_raw_b',
-    'final_a', 'final_b',
-    'target_a', 'target_b',
-    'output_a', 'output_b',
-]
-
 
 class DataBuffer:
-    """线程安全的环形数据缓冲区，附带 CSV 内存缓存记录功能。"""
+    """线程安全的环形数据缓冲区，并可绑定流式录制会话。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._data = np.zeros((CAPACITY, NUM_COLS), dtype=np.float64)
-        self._write_idx: int = 0
-        self._count: int = 0
-        self._frame_index: int = 0
+        self._write_idx = 0
+        self._count = 0
+        self._frame_index = 0
         self._latest: DataFrame | None = None
-        self._recording: bool = False
-        self._csv_buffer: list[list] = []
+        self._recording_session: RecordingSession | None = None
 
     def append(self, frame: DataFrame) -> None:
         """将一帧数据写入环形缓冲区。由子线程调用，加锁保护。"""
@@ -71,25 +60,17 @@ class DataBuffer:
             self._write_idx += 1
             if self._count < CAPACITY:
                 self._count += 1
+            frame_index = self._frame_index
             self._frame_index += 1
             self._latest = frame
+            recording_session = self._recording_session
 
-            if self._recording:
-                time_s = (self._frame_index - 1) * 0.01
-                self._csv_buffer.append([
-                    self._frame_index - 1, f'{time_s:.2f}',
-                    frame.t_raw_A, frame.t_raw_B,
-                    frame.m_raw_A, frame.m_raw_B,
-                    frame.final_A, frame.final_B,
-                    frame.target_A, frame.target_B,
-                    frame.output_A, frame.output_B,
-                ])
+        if recording_session is not None:
+            time_s = frame_index * 0.01
+            recording_session.write_frame(frame_index=frame_index, time_s=time_s, frame=frame)
 
     def get_snapshot(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        获取当前缓冲区的有序快照。
-        返回 (time_array, data_array)。
-        """
+        """获取当前缓冲区的有序快照，返回 (time_array, data_array)。"""
         with self._lock:
             n = self._count
             if n == 0:
@@ -106,6 +87,15 @@ class DataBuffer:
             time_array = np.arange(start_index, end_index, dtype=np.float64) * 0.01
             return time_array, data
 
+    def get_recent_window(self, window_s: float) -> tuple[np.ndarray, np.ndarray]:
+        """返回最近指定秒数的数据窗口。"""
+        time_array, data = self.get_snapshot()
+        if time_array.size == 0:
+            return time_array, data
+        start_time = max(float(time_array[-1] - window_s), float(time_array[0]))
+        start_idx = int(np.searchsorted(time_array, start_time, side="right"))
+        return time_array[start_idx:], data[start_idx:]
+
     def get_latest(self) -> DataFrame | None:
         """获取最新一帧数据，用于数值面板更新。"""
         with self._lock:
@@ -113,7 +103,8 @@ class DataBuffer:
 
     @property
     def frame_index(self) -> int:
-        return self._frame_index
+        with self._lock:
+            return self._frame_index
 
     def clear(self) -> None:
         """清空缓冲区数据。"""
@@ -124,36 +115,24 @@ class DataBuffer:
             self._frame_index = 0
             self._latest = None
 
-    def start_recording(self) -> None:
-        """开始记录，数据缓存在内存中。"""
+    def start_recording(self, session: RecordingSession) -> None:
+        """绑定一个已启动的流式录制会话。"""
         with self._lock:
-            if self._recording:
-                return
-            self._csv_buffer.clear()
-            self._recording = True
+            self._recording_session = session
 
-    def stop_recording(self, filepath: str | Path | None = None) -> int:
-        """
-        停止记录。如果提供了 filepath，将缓存数据一次性写入 CSV 文件。
-        filepath 为 None 时丢弃数据。返回记录的行数。
-        """
+    def stop_recording(self) -> RecordingSession | None:
+        """解除当前录制会话并返回它，由调用方决定保存或取消。"""
         with self._lock:
-            if not self._recording:
-                return 0
-            self._recording = False
-            total = len(self._csv_buffer)
-            if filepath and self._csv_buffer:
-                with open(filepath, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(CSV_HEADER)
-                    writer.writerows(self._csv_buffer)
-            self._csv_buffer.clear()
-            return total
+            session = self._recording_session
+            self._recording_session = None
+            return session
 
     @property
     def recording(self) -> bool:
-        return self._recording
+        with self._lock:
+            return self._recording_session is not None
 
     @property
     def csv_rows_written(self) -> int:
-        return len(self._csv_buffer)
+        with self._lock:
+            return 0 if self._recording_session is None else self._recording_session.rows_written
