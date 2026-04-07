@@ -27,13 +27,16 @@ class CommandPanel(QWidget):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
         pid_group = QGroupBox("PID 设置")
         pid_layout = QVBoxLayout()
+        pid_layout.setSpacing(4)
 
         target_row = QHBoxLayout()
+        target_row.setSpacing(4)
         self._pid_target = QButtonGroup(self)
         for text, cmd_id in [
             ("两轮同步", CMD_SET_PID_BOTH),
@@ -47,6 +50,8 @@ class CommandPanel(QWidget):
         pid_layout.addLayout(target_row)
 
         pid_form = QFormLayout()
+        pid_form.setHorizontalSpacing(6)
+        pid_form.setVerticalSpacing(4)
         self._kp_spin = self._make_spin(0, 50000, 4, 0.1)
         self._ki_spin = self._make_spin(0, 50000, 4, 0.1)
         self._kd_spin = self._make_spin(0, 50000, 4, 0.1)
@@ -64,9 +69,13 @@ class CommandPanel(QWidget):
 
         speed_group = QGroupBox("速度参数")
         speed_layout = QVBoxLayout()
+        speed_layout.setSpacing(4)
         speed_form = QFormLayout()
+        speed_form.setHorizontalSpacing(6)
+        speed_form.setVerticalSpacing(4)
 
         rc_row = QHBoxLayout()
+        rc_row.setSpacing(4)
         self._rc_speed_spin = self._make_spin(0.01, 10000, 2, 10)
         self._rc_speed_spin.setValue(100)
         rc_row.addWidget(self._rc_speed_spin)
@@ -78,6 +87,7 @@ class CommandPanel(QWidget):
         speed_form.addRow("遥控速度:", rc_row)
 
         ms_row = QHBoxLayout()
+        ms_row.setSpacing(4)
         self._max_speed_spin = self._make_spin(0.01, 10, 3, 0.1)
         self._max_speed_spin.setValue(1.0)
         ms_row.addWidget(self._max_speed_spin)
@@ -89,6 +99,7 @@ class CommandPanel(QWidget):
         speed_form.addRow("最大速度:", ms_row)
 
         sm_row = QHBoxLayout()
+        sm_row.setSpacing(4)
         self._smooth_spin = self._make_spin(0.001, 1.0, 4, 0.01)
         self._smooth_spin.setValue(0.01)
         sm_row.addWidget(self._smooth_spin)
@@ -106,18 +117,18 @@ class CommandPanel(QWidget):
         line.setFrameShadow(QFrame.Sunken)
         speed_layout.addWidget(line)
 
-        self._query_btn = QPushButton("查询参数")
-        self._query_btn.clicked.connect(self._query_params)
-        speed_layout.addWidget(self._query_btn)
-
         speed_group.setLayout(speed_layout)
         layout.addWidget(speed_group)
 
         target_group = QGroupBox("USART1 目标控制")
         target_layout = QVBoxLayout()
+        target_layout.setSpacing(4)
         target_form = QFormLayout()
+        target_form.setHorizontalSpacing(6)
+        target_form.setVerticalSpacing(4)
 
         speed_ab_row = QHBoxLayout()
+        speed_ab_row.setSpacing(4)
         self._target_speed_a_spin = self._make_spin(0.0, 10.0, 3, 0.1)
         self._target_speed_b_spin = self._make_spin(0.0, 10.0, 3, 0.1)
         speed_ab_row.addWidget(self._target_speed_a_spin)
@@ -128,6 +139,7 @@ class CommandPanel(QWidget):
         target_form.addRow("A/B 速度:", speed_ab_row)
 
         pwm_ab_row = QHBoxLayout()
+        pwm_ab_row.setSpacing(4)
         self._target_pwm_a_spin = self._make_int_spin(0, 16800, 100)
         self._target_pwm_b_spin = self._make_int_spin(0, 16800, 100)
         pwm_ab_row.addWidget(self._target_pwm_a_spin)
@@ -140,6 +152,11 @@ class CommandPanel(QWidget):
         target_layout.addLayout(target_form)
         target_group.setLayout(target_layout)
         layout.addWidget(target_group)
+
+        self._query_btn = QPushButton("查询参数")
+        self._query_btn.clicked.connect(self._query_params)
+        layout.addWidget(self._query_btn)
+        layout.addStretch()
 
     def fill_params(self, frame: ParamFrame) -> None:
         """收到参数帧后回填当前值到 SpinBox，方便用户微调。"""
@@ -198,6 +215,7 @@ class CommandPanel(QWidget):
         spin.setRange(min_val, max_val)
         spin.setDecimals(decimals)
         spin.setSingleStep(step)
+        spin.setMaximumWidth(120)
         return spin
 
     @staticmethod
@@ -205,4 +223,5 @@ class CommandPanel(QWidget):
         spin = QSpinBox()
         spin.setRange(min_val, max_val)
         spin.setSingleStep(step)
+        spin.setMaximumWidth(120)
         return spin

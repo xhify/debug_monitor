@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -117,28 +118,29 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(control_row)
         mid_splitter.addWidget(left_widget)
 
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
+        self._right_sidebar = QWidget()
+        right_layout = QVBoxLayout(self._right_sidebar)
         right_layout.setContentsMargins(0, 0, 0, 0)
-
-        self._data_panel = DataPanel()
-        right_layout.addWidget(self._data_panel)
-
-        self._param_panel = ParamPanel()
-        right_layout.addWidget(self._param_panel)
-
-        self._analysis_panel = AnalysisPanel()
-        right_layout.addWidget(self._analysis_panel)
-        right_layout.addStretch()
-
-        mid_splitter.addWidget(right_widget)
-        mid_splitter.setStretchFactor(0, 7)
-        mid_splitter.setStretchFactor(1, 3)
-        main_layout.addWidget(mid_splitter, stretch=1)
+        right_layout.setSpacing(6)
 
         self._command_panel = CommandPanel()
         self._command_panel.command_ready.connect(self._worker.send_command)
-        main_layout.addWidget(self._command_panel)
+        right_layout.addWidget(self._command_panel)
+
+        self._data_panel = DataPanel()
+        self._param_panel = ParamPanel()
+        self._analysis_panel = AnalysisPanel()
+        self._monitor_tabs = QTabWidget()
+        self._monitor_tabs.addTab(self._param_panel, "固件参数")
+        self._monitor_tabs.addTab(self._data_panel, "当前数据")
+        self._monitor_tabs.addTab(self._analysis_panel, "统计分析")
+        self._monitor_tabs.setCurrentWidget(self._param_panel)
+        right_layout.addWidget(self._monitor_tabs, stretch=1)
+
+        mid_splitter.addWidget(self._right_sidebar)
+        mid_splitter.setStretchFactor(0, 7)
+        mid_splitter.setStretchFactor(1, 3)
+        main_layout.addWidget(mid_splitter, stretch=1)
 
         self._status_label = QLabel("就绪")
         self.statusBar().addWidget(self._status_label, stretch=1)

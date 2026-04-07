@@ -14,6 +14,14 @@ class MainWindowReplayTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_monitor_panels_move_into_tabs_with_param_default(self) -> None:
+        window = MainWindow()
+
+        self.assertEqual(window._monitor_tabs.count(), 3)
+        self.assertEqual(window._monitor_tabs.tabText(0), "固件参数")
+        self.assertIs(window._monitor_tabs.currentWidget(), window._param_panel)
+        self.assertIs(window._command_panel.parentWidget(), window._right_sidebar)
+
     def test_switching_to_replay_enables_replay_mode(self) -> None:
         window = MainWindow()
         window._set_replay_loaded_for_test(
