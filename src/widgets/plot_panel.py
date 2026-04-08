@@ -1,25 +1,21 @@
-"""
-实时绘图面板：速度图（8条曲线）+ PWM图（4条曲线），垂直堆叠，X轴联动。
+"""实时绘图面板：速度图（8条曲线）+ PWM/AFC 图（4条曲线），垂直堆叠，X轴联动。"""
 
-性能优化：
-- setDownsampling(mode='peak')：缩放到全局时自动降采样
-- setClipToView(True)：仅渲染可见区域的数据点
-"""
+from __future__ import annotations
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QCheckBox, QHBoxLayout, QSplitter
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 import pyqtgraph as pg
 
-from data_buffer import DataBuffer
 from data_buffer import (
-    COL_T_RAW_A, COL_T_RAW_B, COL_M_RAW_A, COL_M_RAW_B,
-    COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B,
-    COL_OUT_A, COL_OUT_B, COL_AFC_A, COL_AFC_B,
+    COL_AFC_A, COL_AFC_B, COL_FINAL_A, COL_FINAL_B, COL_M_RAW_A, COL_M_RAW_B,
+    COL_OUT_A, COL_OUT_B, COL_TGT_A, COL_TGT_B, COL_T_RAW_A, COL_T_RAW_B,
 )
+
+REPLAY_WINDOW_S = 10.0
 
 
 class PlotPanel(QWidget):
-    """实时绘图面板，包含速度图和 PWM 图。"""
+    """实时/回放绘图面板，包含速度图和 PWM 图。"""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -34,49 +30,41 @@ class PlotPanel(QWidget):
         splitter = QSplitter(Qt.Vertical)
 
         self._speed_plot = pg.PlotWidget(title="速度 (m/s)")
-        self._speed_plot.setBackground('w')
+        self._speed_plot.setBackground("w")
         self._speed_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._speed_plot.setLabel('left', '速度', units='m/s')
-        self._speed_plot.setLabel('bottom', '时间', units='s')
+        self._speed_plot.setLabel("left", "速度", units="m/s")
+        self._speed_plot.setLabel("bottom", "时间", units="s")
         self._speed_plot.addLegend(offset=(10, 10))
         self._apply_perf_opts(self._speed_plot)
 
-        self._curves['t_raw_A'] = self._speed_plot.plot(
-            pen=pg.mkPen('#c0392b', width=1), name='T法A')
-        self._curves['t_raw_B'] = self._speed_plot.plot(
-            pen=pg.mkPen('#2980b9', width=1), name='T法B')
-        self._curves['m_raw_A'] = self._speed_plot.plot(
-            pen=pg.mkPen('#e67e22', width=1, style=Qt.DashLine), name='M法A')
-        self._curves['m_raw_B'] = self._speed_plot.plot(
-            pen=pg.mkPen('#00acc1', width=1, style=Qt.DashLine), name='M法B')
-        self._curves['final_A'] = self._speed_plot.plot(
-            pen=pg.mkPen('#f1c40f', width=2), name='融合A')
-        self._curves['final_B'] = self._speed_plot.plot(
-            pen=pg.mkPen('#1abc9c', width=2), name='融合B')
-        self._curves['tgt_A'] = self._speed_plot.plot(
-            pen=pg.mkPen('#2ecc71', width=1.5, style=Qt.DashLine), name='目标A')
-        self._curves['tgt_B'] = self._speed_plot.plot(
-            pen=pg.mkPen('#9b59b6', width=1.5, style=Qt.DotLine), name='目标B')
+        self._curves["t_raw_A"] = self._speed_plot.plot(pen=pg.mkPen("#c0392b", width=1), name="T法A")
+        self._curves["t_raw_B"] = self._speed_plot.plot(pen=pg.mkPen("#2980b9", width=1), name="T法B")
+        self._curves["m_raw_A"] = self._speed_plot.plot(pen=pg.mkPen("#e67e22", width=1, style=Qt.DashLine), name="M法A")
+        self._curves["m_raw_B"] = self._speed_plot.plot(pen=pg.mkPen("#00acc1", width=1, style=Qt.DashLine), name="M法B")
+        self._curves["final_A"] = self._speed_plot.plot(pen=pg.mkPen("#f1c40f", width=2), name="融合A")
+        self._curves["final_B"] = self._speed_plot.plot(pen=pg.mkPen("#1abc9c", width=2), name="融合B")
+        self._curves["tgt_A"] = self._speed_plot.plot(pen=pg.mkPen("#2ecc71", width=1.5, style=Qt.DashLine), name="目标A")
+        self._curves["tgt_B"] = self._speed_plot.plot(pen=pg.mkPen("#9b59b6", width=1.5, style=Qt.DotLine), name="目标B")
 
         splitter.addWidget(self._speed_plot)
 
         self._pwm_plot = pg.PlotWidget(title="PWM 输出")
-        self._pwm_plot.setBackground('w')
+        self._pwm_plot.setBackground("w")
         self._pwm_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._pwm_plot.setLabel('left', 'PWM')
-        self._pwm_plot.setLabel('bottom', '时间', units='s')
+        self._pwm_plot.setLabel("left", "PWM")
+        self._pwm_plot.setLabel("bottom", "时间", units="s")
         self._pwm_plot.addLegend(offset=(10, 10))
         self._pwm_plot.setXLink(self._speed_plot)
         self._apply_perf_opts(self._pwm_plot)
 
-        self._curves['out_A'] = self._pwm_plot.plot(
-            pen=pg.mkPen('#ff7043', width=2), name='PWM A')
-        self._curves['out_B'] = self._pwm_plot.plot(
-            pen=pg.mkPen('#7e57c2', width=2), name='PWM B')
-        self._curves['afc_A'] = self._pwm_plot.plot(
-            pen=pg.mkPen('#8e44ad', width=1.5, style=Qt.DashLine), name='AFC A')
-        self._curves['afc_B'] = self._pwm_plot.plot(
-            pen=pg.mkPen('#16a085', width=1.5, style=Qt.DashLine), name='AFC B')
+        self._curves["out_A"] = self._pwm_plot.plot(pen=pg.mkPen("#ff7043", width=2), name="PWM A")
+        self._curves["out_B"] = self._pwm_plot.plot(pen=pg.mkPen("#7e57c2", width=2), name="PWM B")
+        self._curves["afc_A"] = self._pwm_plot.plot(
+            pen=pg.mkPen("#8e44ad", width=1.5, style=Qt.DashLine), name="AFC A"
+        )
+        self._curves["afc_B"] = self._pwm_plot.plot(
+            pen=pg.mkPen("#16a085", width=1.5, style=Qt.DashLine), name="AFC B"
+        )
 
         splitter.addWidget(self._pwm_plot)
         splitter.setStretchFactor(0, 2)
@@ -114,29 +102,34 @@ class PlotPanel(QWidget):
     @staticmethod
     def _apply_perf_opts(plot_widget: pg.PlotWidget) -> None:
         plot_item = plot_widget.getPlotItem()
-        plot_item.setDownsampling(mode='peak')
+        plot_item.setDownsampling(mode="peak")
         plot_item.setClipToView(True)
 
-    def refresh(self, buffer: DataBuffer) -> None:
+    def refresh_series(self, time_arr, data) -> None:
         if self._paused:
             return
-
-        time_arr, data = buffer.get_snapshot()
         if len(time_arr) == 0:
+            self.reset()
             return
 
-        self._curves['t_raw_A'].setData(time_arr, data[:, COL_T_RAW_A])
-        self._curves['t_raw_B'].setData(time_arr, data[:, COL_T_RAW_B])
-        self._curves['m_raw_A'].setData(time_arr, data[:, COL_M_RAW_A])
-        self._curves['m_raw_B'].setData(time_arr, data[:, COL_M_RAW_B])
-        self._curves['final_A'].setData(time_arr, data[:, COL_FINAL_A])
-        self._curves['final_B'].setData(time_arr, data[:, COL_FINAL_B])
-        self._curves['tgt_A'].setData(time_arr, data[:, COL_TGT_A])
-        self._curves['tgt_B'].setData(time_arr, data[:, COL_TGT_B])
-        self._curves['out_A'].setData(time_arr, data[:, COL_OUT_A])
-        self._curves['out_B'].setData(time_arr, data[:, COL_OUT_B])
-        self._curves['afc_A'].setData(time_arr, data[:, COL_AFC_A])
-        self._curves['afc_B'].setData(time_arr, data[:, COL_AFC_B])
+        self._curves["t_raw_A"].setData(time_arr, data[:, COL_T_RAW_A])
+        self._curves["t_raw_B"].setData(time_arr, data[:, COL_T_RAW_B])
+        self._curves["m_raw_A"].setData(time_arr, data[:, COL_M_RAW_A])
+        self._curves["m_raw_B"].setData(time_arr, data[:, COL_M_RAW_B])
+        self._curves["final_A"].setData(time_arr, data[:, COL_FINAL_A])
+        self._curves["final_B"].setData(time_arr, data[:, COL_FINAL_B])
+        self._curves["tgt_A"].setData(time_arr, data[:, COL_TGT_A])
+        self._curves["tgt_B"].setData(time_arr, data[:, COL_TGT_B])
+        self._curves["out_A"].setData(time_arr, data[:, COL_OUT_A])
+        self._curves["out_B"].setData(time_arr, data[:, COL_OUT_B])
+        self._curves["afc_A"].setData(time_arr, data[:, COL_AFC_A])
+        self._curves["afc_B"].setData(time_arr, data[:, COL_AFC_B])
+
+    def follow_time_cursor(self, current_time: float) -> None:
+        """回放模式固定显示最近 10 秒窗口。"""
+        end = max(REPLAY_WINDOW_S, float(current_time))
+        start = max(0.0, end - REPLAY_WINDOW_S)
+        self._speed_plot.setXRange(start, end, padding=0.0)
 
     def reset(self) -> None:
         for curve in self._curves.values():

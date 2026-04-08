@@ -1,29 +1,39 @@
 """
 主窗口：布局编排、信号连接、定时器管理。
-
-数据流：
-- SerialWorker (子线程) → DataBuffer (共享, Lock)
-- QTimer 33ms (主线程) → 读 DataBuffer → 更新 PlotPanel + DataPanel
-- CommandPanel → command_ready → SerialWorker.send_command
-- SerialWorker.param_received → ParamPanel + CommandPanel
 """
 
+from __future__ import annotations
+
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QSplitter,
-    QPushButton, QHBoxLayout, QLabel, QFileDialog,
-)
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSlider,
+    QSplitter,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-from data_buffer import DataBuffer
+from analytics import compute_channel_metrics
+from data_buffer import COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B, DataBuffer
+from recording_session import RecordingSession
+from replay_data import ReplayData
 from serial_worker import SerialWorker
-from widgets.serial_panel import SerialPanel
-from widgets.plot_panel import PlotPanel
-from widgets.data_panel import DataPanel
+from widgets.analysis_panel import AnalysisPanel
 from widgets.command_panel import CommandPanel
+from widgets.data_panel import DataPanel
 from widgets.param_panel import ParamPanel
+from widgets.plot_panel import PlotPanel
+from widgets.serial_panel import SerialPanel
 
 
 class MainWindow(QMainWindow):
@@ -34,14 +44,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("WHEELTEC C50X 调试监视器")
         self.resize(1400, 850)
 
-        # 共享数据缓冲区
         self._buffer = DataBuffer()
-
-        # 串口工作线程（持有 buffer 引用）
         self._worker = SerialWorker(self._buffer)
         self._worker.param_received.connect(self._on_param)
         self._worker.error_occurred.connect(self._on_error)
         self._worker.connection_changed.connect(self._on_connection_changed)
+
+        self._data_mode = "live"
+        self._replay_data: ReplayData | None = None
+        self._replay_current_time = 0.0
+        self._replay_speed = 1.0
 
         self._setup_ui()
         self._setup_timers()
@@ -53,16 +65,13 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.setSpacing(4)
 
-        # ── 顶部：串口连接面板 ────────────────────────────
         self._serial_panel = SerialPanel()
         self._serial_panel.connect_requested.connect(self._on_connect)
         self._serial_panel.disconnect_requested.connect(self._on_disconnect)
         main_layout.addWidget(self._serial_panel)
 
-        # ── 中部：水平 Splitter（绘图 | 数据+参数）─────────
         mid_splitter = QSplitter(Qt.Horizontal)
 
-        # 左侧：绘图 + 记录控制
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -70,46 +79,69 @@ class MainWindow(QMainWindow):
         self._plot_panel = PlotPanel()
         left_layout.addWidget(self._plot_panel, stretch=1)
 
-        # 记录 + 清空按钮行
-        record_row = QHBoxLayout()
-        record_row.addStretch()
+        control_row = QHBoxLayout()
         self._clear_btn = QPushButton("清空数据")
         self._clear_btn.clicked.connect(self._clear_data)
-        record_row.addWidget(self._clear_btn)
+        control_row.addWidget(self._clear_btn)
+
         self._record_btn = QPushButton("开始记录")
         self._record_btn.clicked.connect(self._toggle_record)
-        record_row.addWidget(self._record_btn)
-        left_layout.addLayout(record_row)
+        control_row.addWidget(self._record_btn)
 
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("实时", "live")
+        self._mode_combo.addItem("回放", "replay")
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        control_row.addWidget(self._mode_combo)
+
+        self._load_btn = QPushButton("加载 CSV")
+        self._load_btn.clicked.connect(self._load_replay_csv)
+        control_row.addWidget(self._load_btn)
+
+        self._play_btn = QPushButton("播放")
+        self._play_btn.clicked.connect(self._toggle_replay_playback)
+        control_row.addWidget(self._play_btn)
+
+        self._progress_slider = QSlider(Qt.Horizontal)
+        self._progress_slider.setRange(0, 1000)
+        self._progress_slider.sliderMoved.connect(self._on_replay_slider_changed)
+        control_row.addWidget(self._progress_slider, stretch=1)
+
+        self._speed_combo = QComboBox()
+        self._speed_combo.addItem("0.5x", 0.5)
+        self._speed_combo.addItem("1x", 1.0)
+        self._speed_combo.addItem("2x", 2.0)
+        self._speed_combo.setCurrentIndex(1)
+        self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
+        control_row.addWidget(self._speed_combo)
+
+        left_layout.addLayout(control_row)
         mid_splitter.addWidget(left_widget)
 
-        # 右侧：数据面板 + 参数面板
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
+        self._right_sidebar = QWidget()
+        right_layout = QVBoxLayout(self._right_sidebar)
         right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
 
-        self._data_panel = DataPanel()
-        right_layout.addWidget(self._data_panel)
-
-        self._param_panel = ParamPanel()
-        right_layout.addWidget(self._param_panel)
-
-        right_layout.addStretch()
-
-        mid_splitter.addWidget(right_widget)
-
-        # 左侧占 70%，右侧占 30%
-        mid_splitter.setStretchFactor(0, 7)
-        mid_splitter.setStretchFactor(1, 3)
-
-        main_layout.addWidget(mid_splitter, stretch=1)
-
-        # ── 底部：命令面板 ────────────────────────────────
         self._command_panel = CommandPanel()
         self._command_panel.command_ready.connect(self._worker.send_command)
-        main_layout.addWidget(self._command_panel)
+        right_layout.addWidget(self._command_panel)
 
-        # ── 状态栏 ────────────────────────────────────────
+        self._data_panel = DataPanel()
+        self._param_panel = ParamPanel()
+        self._analysis_panel = AnalysisPanel()
+        self._monitor_tabs = QTabWidget()
+        self._monitor_tabs.addTab(self._param_panel, "固件参数")
+        self._monitor_tabs.addTab(self._data_panel, "当前数据")
+        self._monitor_tabs.addTab(self._analysis_panel, "统计分析")
+        self._monitor_tabs.setCurrentWidget(self._param_panel)
+        right_layout.addWidget(self._monitor_tabs, stretch=1)
+
+        mid_splitter.addWidget(self._right_sidebar)
+        mid_splitter.setStretchFactor(0, 7)
+        mid_splitter.setStretchFactor(1, 3)
+        main_layout.addWidget(mid_splitter, stretch=1)
+
         self._status_label = QLabel("就绪")
         self.statusBar().addWidget(self._status_label, stretch=1)
         self._frame_label = QLabel("帧: 0")
@@ -119,19 +151,20 @@ class MainWindow(QMainWindow):
         self._record_label = QLabel("")
         self.statusBar().addPermanentWidget(self._record_label)
 
+        self._replay_controls_enabled(False)
+
     def _setup_timers(self) -> None:
-        """设置定时器。"""
-        # 绘图 + 数值更新定时器（~30fps）
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._on_refresh)
         self._refresh_timer.start(33)
 
-        # 状态栏更新定时器（1秒）
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start(1000)
 
-    # ─── 槽函数 ───────────────────────────────────────────
+        self._replay_timer = QTimer(self)
+        self._replay_timer.timeout.connect(self._advance_replay)
+        self._replay_timer.start(33)
 
     def _on_connect(self, port: str, baudrate: int) -> None:
         self._buffer.clear()
@@ -139,18 +172,14 @@ class MainWindow(QMainWindow):
 
     def _on_disconnect(self) -> None:
         if self._buffer.recording:
-            self._toggle_record()  # 断开时自动停止记录（弹出保存对话框）
+            self._stop_recording_session(save=False)
         self._worker.close_port()
 
     def _on_connection_changed(self, connected: bool) -> None:
         self._serial_panel.set_connected(connected)
-        if connected:
-            self._status_label.setText("已连接，等待数据...")
-        else:
-            self._status_label.setText("已断开")
+        self._status_label.setText("已连接，等待数据..." if connected else "已断开")
 
     def _on_param(self, frame) -> None:
-        """参数帧到达（低频信号，经 Qt Signal 传递）。"""
         self._param_panel.update_params(frame)
         self._command_panel.fill_params(frame)
         self._status_label.setText("已收到参数帧")
@@ -159,12 +188,59 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"错误: {msg}")
 
     def _on_refresh(self) -> None:
-        """33ms 定时器回调：刷新绘图和数值面板。"""
-        self._plot_panel.refresh(self._buffer)
-        self._data_panel.refresh(self._buffer)
+        time_arr, data, frame, title, footer = self._current_source_payload()
+        self._plot_panel.refresh_series(time_arr, data)
+        if self._data_mode == "replay" and self._replay_data is not None and len(time_arr) > 0:
+            self._plot_panel.follow_time_cursor(self._replay_current_time)
+        self._data_panel.refresh_frame(frame, title=title, footer_text=footer)
+        self._update_analysis(time_arr, data)
+        self._sync_replay_slider()
+
+    def _current_source_payload(self):
+        if self._data_mode == "replay" and self._replay_data is not None:
+            time_arr, data = self._replay_data.snapshot_to_time(self._replay_current_time)
+            frame = self._replay_data.latest_frame_at_time(self._replay_current_time)
+            footer = f"t = {self._replay_current_time:.2f} s"
+            return time_arr, data, frame, "回放数据", footer
+
+        time_arr, data = self._buffer.get_snapshot()
+        live_frame = self._buffer.get_latest()
+        if live_frame is None:
+            return time_arr, data, None, "实时数据", "---"
+        frame = {
+            "t_raw_A": live_frame.t_raw_A,
+            "t_raw_B": live_frame.t_raw_B,
+            "m_raw_A": live_frame.m_raw_A,
+            "m_raw_B": live_frame.m_raw_B,
+            "final_A": live_frame.final_A,
+            "final_B": live_frame.final_B,
+            "target_A": live_frame.target_A,
+            "target_B": live_frame.target_B,
+            "output_A": live_frame.output_A,
+            "output_B": live_frame.output_B,
+            "afc_output_A": live_frame.afc_output_A,
+            "afc_output_B": live_frame.afc_output_B,
+        }
+        footer = self._data_panel._live_fps_text(self._buffer.frame_index)
+        return time_arr, data, frame, "实时数据", footer
+
+    def _update_analysis(self, time_arr, data) -> None:
+        if len(time_arr) == 0 or len(data) == 0:
+            empty = compute_channel_metrics(time_arr, time_arr, time_arr)
+            self._analysis_panel.update_metrics("无数据", empty, empty)
+            return
+
+        if self._data_mode == "live":
+            time_arr, data = self._buffer.get_recent_window(10.0)
+            label = "最近 10 秒"
+        else:
+            label = "当前回放范围"
+
+        metrics_a = compute_channel_metrics(time_arr, data[:, COL_TGT_A], data[:, COL_FINAL_A])
+        metrics_b = compute_channel_metrics(time_arr, data[:, COL_TGT_B], data[:, COL_FINAL_B])
+        self._analysis_panel.update_metrics(label, metrics_a, metrics_b)
 
     def _update_status(self) -> None:
-        """1秒定时器回调：更新状态栏计数。"""
         self._frame_label.setText(f"帧: {self._buffer.frame_index}")
         self._error_label.setText(f"错误: {self._worker.error_count}")
         if self._buffer.recording:
@@ -173,48 +249,136 @@ class MainWindow(QMainWindow):
             self._record_label.setText("")
 
     def _toggle_record(self) -> None:
-        """切换 CSV 记录状态。开始时缓存到内存，停止时选择文件保存。"""
         if not self._buffer.recording:
-            # 开始记录（仅内存缓存，不弹文件对话框）
-            self._buffer.start_recording()
-            self._record_btn.setText("停止记录")
-            self._record_btn.setStyleSheet("background-color: #e74c3c; color: white;")
-            self._status_label.setText("正在记录...")
+            self._start_recording_session()
+            return
+        self._stop_recording_session(save=True)
+
+    def _start_recording_session(self) -> None:
+        session = RecordingSession(base_dir=Path(tempfile.gettempdir()))
+        session.start()
+        self._buffer.start_recording(session)
+        self._record_btn.setText("停止记录")
+        self._record_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+        self._status_label.setText("正在流式记录...")
+
+    def _stop_recording_session(self, save: bool) -> None:
+        session = self._buffer.stop_recording()
+        self._record_btn.setText("开始记录")
+        self._record_btn.setStyleSheet("")
+        if session is None:
+            return
+
+        if not save:
+            session.cancel()
+            self._status_label.setText("记录已取消")
+            return
+
+        kp, ki, kd = self._command_panel.current_pid_values_int()
+        default_name = f"debug_data_kp{kp}_ki{ki}_kd{kd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        filepath, _ = QFileDialog.getSaveFileName(self, "保存记录数据", default_name, "CSV 文件 (*.csv)")
+        if filepath:
+            session.finalize(Path(filepath))
+            self._status_label.setText(f"记录已保存，共 {session.rows_written} 行")
         else:
-            # 停止记录，弹出保存对话框
-            kp, ki, kd = self._command_panel.current_pid_values_int()
-            default_name = (
-                f"debug_data_kp{kp}_ki{ki}_kd{kd}_"
-                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            )
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "保存记录数据", default_name, "CSV 文件 (*.csv)"
-            )
-            total = self._buffer.stop_recording(filepath if filepath else None)
-            self._record_btn.setText("开始记录")
-            self._record_btn.setStyleSheet("")
-            if filepath:
-                self._status_label.setText(f"记录已保存，共 {total} 行")
-            else:
-                self._status_label.setText(f"记录已丢弃（{total} 行）")
+            session.cancel()
+            self._status_label.setText(f"记录已丢弃（{session.rows_written} 行）")
+
+    def _load_replay_csv(self) -> None:
+        filepath, _ = QFileDialog.getOpenFileName(self, "加载 CSV 回放", "", "CSV 文件 (*.csv)")
+        if not filepath:
+            return
+        try:
+            self._replay_data = ReplayData.load(Path(filepath))
+        except Exception as exc:
+            self._status_label.setText(f"加载回放失败: {exc}")
+            return
+        self._replay_current_time = 0.0
+        self._replay_controls_enabled(True)
+        self._set_data_mode("replay")
+        self._status_label.setText(f"已加载回放: {Path(filepath).name}")
+
+    def _replay_controls_enabled(self, enabled: bool) -> None:
+        self._play_btn.setEnabled(enabled)
+        self._progress_slider.setEnabled(enabled)
+        self._speed_combo.setEnabled(enabled)
+
+    def _on_mode_changed(self) -> None:
+        self._set_data_mode(self._mode_combo.currentData())
+
+    def _set_data_mode(self, mode: str) -> None:
+        if mode == "replay" and self._replay_data is None:
+            self._mode_combo.setCurrentIndex(0)
+            self._status_label.setText("请先加载 CSV")
+            self._data_mode = "live"
+            return
+        self._data_mode = mode
+        index = 0 if mode == "live" else 1
+        if self._mode_combo.currentIndex() != index:
+            self._mode_combo.setCurrentIndex(index)
+        if mode == "live":
+            self._play_btn.setText("播放")
+
+    def _toggle_replay_playback(self) -> None:
+        if self._data_mode != "replay" or self._replay_data is None:
+            return
+        if self._replay_timer.isActive() and self._play_btn.text() == "暂停":
+            self._play_btn.setText("播放")
+            return
+        self._play_btn.setText("暂停")
+
+    def _advance_replay(self) -> None:
+        if self._data_mode != "replay" or self._replay_data is None:
+            return
+        if self._play_btn.text() != "暂停":
+            return
+        self._replay_current_time += 0.033 * self._replay_speed
+        if self._replay_current_time >= self._replay_data.duration_s:
+            self._replay_current_time = self._replay_data.duration_s
+            self._play_btn.setText("播放")
+
+    def _on_replay_slider_changed(self, value: int) -> None:
+        if self._replay_data is None:
+            return
+        ratio = value / 1000.0
+        self._replay_current_time = self._replay_data.duration_s * ratio
+
+    def _sync_replay_slider(self) -> None:
+        if self._replay_data is None or self._replay_data.duration_s <= 0:
+            return
+        ratio = self._replay_current_time / self._replay_data.duration_s
+        self._progress_slider.blockSignals(True)
+        self._progress_slider.setValue(int(max(0.0, min(ratio, 1.0)) * 1000))
+        self._progress_slider.blockSignals(False)
+
+    def _on_speed_changed(self) -> None:
+        self._replay_speed = float(self._speed_combo.currentData())
 
     def _clear_data(self) -> None:
-        """清空缓冲区数据和图表。"""
         if self._buffer.recording:
-            self._buffer.stop_recording(None)  # 丢弃记录中的数据
-            self._record_btn.setText("开始记录")
-            self._record_btn.setStyleSheet("")
+            self._stop_recording_session(save=False)
         self._buffer.clear()
+        if self._data_mode == "replay":
+            self._replay_current_time = 0.0
         self._plot_panel.reset()
         self._status_label.setText("数据已清空")
 
-    # ─── 关闭事件 ─────────────────────────────────────────
+    def current_data_mode(self) -> str:
+        return self._data_mode
+
+    def _set_replay_loaded_for_test(self, time_values, rows) -> None:
+        self._replay_data = ReplayData.from_rows(time_values, rows)
+        self._replay_current_time = float(time_values[-1]) if time_values else 0.0
+        self._replay_controls_enabled(True)
+
+    def _set_data_mode_for_test(self, mode: str) -> None:
+        self._set_data_mode(mode)
 
     def closeEvent(self, event) -> None:
-        """关闭窗口时清理资源。"""
         if self._buffer.recording:
-            self._buffer.stop_recording(None)
+            self._stop_recording_session(save=False)
         self._refresh_timer.stop()
         self._status_timer.stop()
+        self._replay_timer.stop()
         self._worker.close_port()
         super().closeEvent(event)

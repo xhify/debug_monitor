@@ -6,6 +6,7 @@ __pycache__/
 # Virtual environment
 .venv/
 .worktrees/
+.superpowers/
 
 # IDE
 .vscode/
@@ -13,7 +14,11 @@ __pycache__/
 
 # Data files
 *.csv
+settings/pid_config.json
 
 # OS
 Thumbs.db
 .DS_Store
+
+# Test scratch
+tests/_tmp_command_panel/
