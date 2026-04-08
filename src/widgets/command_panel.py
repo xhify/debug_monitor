@@ -1,12 +1,17 @@
 """命令发送面板：PID 设置、速度参数设置、参数查询。"""
 
+from __future__ import annotations
+
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QRadioButton, QButtonGroup, QPushButton,
-    QDoubleSpinBox, QFormLayout, QFrame, QSpinBox,
+    QDoubleSpinBox, QFormLayout, QFrame, QSpinBox, QLabel,
 )
 from PySide6.QtCore import Signal
 
+from pid_settings import load_pid_settings, save_pid_settings
 from protocol import (
     CMD_SET_PID_BOTH, CMD_SET_PID_A, CMD_SET_PID_B,
     CMD_SET_RC_SPEED, CMD_SET_MAX_SPEED, CMD_SET_SMOOTH_STEP,
@@ -22,9 +27,16 @@ class CommandPanel(QWidget):
 
     command_ready = Signal(bytes)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, settings_path: Path | None = None) -> None:
         super().__init__(parent)
+        self._settings_path = settings_path
+        self._device_pid = {
+            "motor_a": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
+            "motor_b": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
+        }
         self._setup_ui()
+        self._apply_pid_settings(load_pid_settings(self._settings_path))
+        self._update_pid_mode_ui()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -35,34 +47,75 @@ class CommandPanel(QWidget):
         pid_layout = QVBoxLayout()
         pid_layout.setSpacing(4)
 
-        target_row = QHBoxLayout()
-        target_row.setSpacing(4)
-        self._pid_target = QButtonGroup(self)
-        for text, cmd_id in [
-            ("两轮同步", CMD_SET_PID_BOTH),
-            ("电机 A", CMD_SET_PID_A),
-            ("电机 B", CMD_SET_PID_B),
-        ]:
-            rb = QRadioButton(text)
-            self._pid_target.addButton(rb, cmd_id)
-            target_row.addWidget(rb)
-        self._pid_target.button(CMD_SET_PID_BOTH).setChecked(True)
-        pid_layout.addLayout(target_row)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(4)
+        self._pid_mode_group = QButtonGroup(self)
+        self._pid_mode_sync = QRadioButton("两轮同步")
+        self._pid_mode_independent = QRadioButton("独立配置")
+        self._pid_mode_group.addButton(self._pid_mode_sync)
+        self._pid_mode_group.addButton(self._pid_mode_independent)
+        mode_row.addWidget(self._pid_mode_sync)
+        mode_row.addWidget(self._pid_mode_independent)
+        mode_row.addStretch()
+        pid_layout.addLayout(mode_row)
 
-        pid_form = QFormLayout()
-        pid_form.setHorizontalSpacing(6)
-        pid_form.setVerticalSpacing(4)
-        self._kp_spin = self._make_spin(0, 50000, 4, 0.1)
-        self._ki_spin = self._make_spin(0, 50000, 4, 0.1)
-        self._kd_spin = self._make_spin(0, 50000, 4, 0.1)
-        pid_form.addRow("Kp:", self._kp_spin)
-        pid_form.addRow("Ki:", self._ki_spin)
-        pid_form.addRow("Kd:", self._kd_spin)
-        pid_layout.addLayout(pid_form)
+        pid_inputs_row = QHBoxLayout()
+        pid_inputs_row.setSpacing(8)
 
-        self._send_pid_btn = QPushButton("设置 PID")
-        self._send_pid_btn.clicked.connect(self._send_pid)
-        pid_layout.addWidget(self._send_pid_btn)
+        a_group = QGroupBox("电机 A")
+        a_form = QFormLayout()
+        a_form.setHorizontalSpacing(6)
+        a_form.setVerticalSpacing(4)
+        self._a_kp_spin = self._make_spin(0, 50000, 4, 0.1)
+        self._a_ki_spin = self._make_spin(0, 50000, 4, 0.1)
+        self._a_kd_spin = self._make_spin(0, 50000, 4, 0.1)
+        a_form.addRow("Kp:", self._a_kp_spin)
+        a_form.addRow("Ki:", self._a_ki_spin)
+        a_form.addRow("Kd:", self._a_kd_spin)
+        a_group.setLayout(a_form)
+        pid_inputs_row.addWidget(a_group)
+
+        b_group = QGroupBox("电机 B")
+        b_form = QFormLayout()
+        b_form.setHorizontalSpacing(6)
+        b_form.setVerticalSpacing(4)
+        self._b_kp_spin = self._make_spin(0, 50000, 4, 0.1)
+        self._b_ki_spin = self._make_spin(0, 50000, 4, 0.1)
+        self._b_kd_spin = self._make_spin(0, 50000, 4, 0.1)
+        b_form.addRow("Kp:", self._b_kp_spin)
+        b_form.addRow("Ki:", self._b_ki_spin)
+        b_form.addRow("Kd:", self._b_kd_spin)
+        b_group.setLayout(b_form)
+        pid_inputs_row.addWidget(b_group)
+
+        pid_layout.addLayout(pid_inputs_row)
+
+        send_row = QHBoxLayout()
+        send_row.setSpacing(4)
+        self._send_pid_both_btn = QPushButton("同步设置 A/B")
+        self._send_pid_both_btn.clicked.connect(self._send_pid_both_from_a)
+        send_row.addWidget(self._send_pid_both_btn)
+        self._send_pid_a_btn = QPushButton("设置 A")
+        self._send_pid_a_btn.clicked.connect(self._send_pid_a)
+        send_row.addWidget(self._send_pid_a_btn)
+        self._send_pid_b_btn = QPushButton("设置 B")
+        self._send_pid_b_btn.clicked.connect(self._send_pid_b)
+        send_row.addWidget(self._send_pid_b_btn)
+        pid_layout.addLayout(send_row)
+
+        load_row = QHBoxLayout()
+        load_row.setSpacing(4)
+        load_row.addWidget(QLabel("载入设备当前值:"))
+        self._load_device_a_btn = QPushButton("载入设备 A")
+        self._load_device_a_btn.clicked.connect(self._load_device_pid_a)
+        self._load_device_a_btn.setEnabled(False)
+        load_row.addWidget(self._load_device_a_btn)
+        self._load_device_b_btn = QPushButton("载入设备 B")
+        self._load_device_b_btn.clicked.connect(self._load_device_pid_b)
+        self._load_device_b_btn.setEnabled(False)
+        load_row.addWidget(self._load_device_b_btn)
+        load_row.addStretch()
+        pid_layout.addLayout(load_row)
 
         pid_group.setLayout(pid_layout)
         layout.addWidget(pid_group)
@@ -158,24 +211,55 @@ class CommandPanel(QWidget):
         layout.addWidget(self._query_btn)
         layout.addStretch()
 
+        for spin in (
+            self._a_kp_spin, self._a_ki_spin, self._a_kd_spin,
+            self._b_kp_spin, self._b_ki_spin, self._b_kd_spin,
+        ):
+            spin.valueChanged.connect(self._save_current_pid_settings)
+        self._pid_mode_sync.toggled.connect(self._on_pid_mode_toggled)
+        self._pid_mode_independent.toggled.connect(self._on_pid_mode_toggled)
+
     def fill_params(self, frame: ParamFrame) -> None:
-        """收到参数帧后回填当前值到 SpinBox，方便用户微调。"""
-        self._kp_spin.setValue(frame.A_kp)
-        self._ki_spin.setValue(frame.A_ki)
-        self._kd_spin.setValue(frame.A_kd)
+        """收到参数帧后更新设备当前值与非 PID 参数。"""
+        self._device_pid = {
+            "motor_a": {"kp": frame.A_kp, "ki": frame.A_ki, "kd": frame.A_kd},
+            "motor_b": {"kp": frame.B_kp, "ki": frame.B_ki, "kd": frame.B_kd},
+        }
+        self._load_device_a_btn.setEnabled(True)
+        self._load_device_b_btn.setEnabled(True)
         self._rc_speed_spin.setValue(frame.rc_speed)
         self._max_speed_spin.setValue(frame.limt_max_speed)
         self._smooth_spin.setValue(frame.smooth_MotorStep)
 
-    def _send_pid(self) -> None:
-        cmd_id = self._pid_target.checkedId()
-        data = build_pid_command(
-            cmd_id,
-            self._kp_spin.value(),
-            self._ki_spin.value(),
-            self._kd_spin.value(),
+    def _send_pid_both_from_a(self) -> None:
+        self.command_ready.emit(
+            build_pid_command(
+                CMD_SET_PID_BOTH,
+                self._a_kp_spin.value(),
+                self._a_ki_spin.value(),
+                self._a_kd_spin.value(),
+            )
         )
-        self.command_ready.emit(data)
+
+    def _send_pid_a(self) -> None:
+        self.command_ready.emit(
+            build_pid_command(
+                CMD_SET_PID_A,
+                self._a_kp_spin.value(),
+                self._a_ki_spin.value(),
+                self._a_kd_spin.value(),
+            )
+        )
+
+    def _send_pid_b(self) -> None:
+        self.command_ready.emit(
+            build_pid_command(
+                CMD_SET_PID_B,
+                self._b_kp_spin.value(),
+                self._b_ki_spin.value(),
+                self._b_kd_spin.value(),
+            )
+        )
 
     def _send_float(self, cmd_id: int, value: float) -> None:
         self.command_ready.emit(build_float_command(cmd_id, value))
@@ -202,12 +286,78 @@ class CommandPanel(QWidget):
         )
 
     def current_pid_values_int(self) -> tuple[int, int, int]:
-        """返回当前面板中的 PID 值，按整数位导出用于文件名。"""
+        """返回 A 组 PID 值，按整数位导出用于文件名。"""
         return (
-            int(self._kp_spin.value()),
-            int(self._ki_spin.value()),
-            int(self._kd_spin.value()),
+            int(self._a_kp_spin.value()),
+            int(self._a_ki_spin.value()),
+            int(self._a_kd_spin.value()),
         )
+
+    def _on_pid_mode_toggled(self) -> None:
+        self._update_pid_mode_ui()
+        self._save_current_pid_settings()
+
+    def _update_pid_mode_ui(self) -> None:
+        sync_mode = self._pid_mode_sync.isChecked()
+        for widget in (self._b_kp_spin, self._b_ki_spin, self._b_kd_spin):
+            widget.setEnabled(not sync_mode)
+        self._send_pid_both_btn.setVisible(sync_mode)
+        self._send_pid_a_btn.setVisible(not sync_mode)
+        self._send_pid_b_btn.setVisible(not sync_mode)
+
+    def _save_current_pid_settings(self) -> None:
+        save_pid_settings(self._collect_pid_settings(), self._settings_path)
+
+    def _collect_pid_settings(self) -> dict:
+        return {
+            "pid_mode": "sync" if self._pid_mode_sync.isChecked() else "independent",
+            "motor_a": {
+                "kp": self._a_kp_spin.value(),
+                "ki": self._a_ki_spin.value(),
+                "kd": self._a_kd_spin.value(),
+            },
+            "motor_b": {
+                "kp": self._b_kp_spin.value(),
+                "ki": self._b_ki_spin.value(),
+                "kd": self._b_kd_spin.value(),
+            },
+        }
+
+    def _apply_pid_settings(self, settings: dict) -> None:
+        all_widgets = [
+            self._pid_mode_sync,
+            self._pid_mode_independent,
+            self._a_kp_spin, self._a_ki_spin, self._a_kd_spin,
+            self._b_kp_spin, self._b_ki_spin, self._b_kd_spin,
+        ]
+        for widget in all_widgets:
+            widget.blockSignals(True)
+
+        self._pid_mode_sync.setChecked(settings.get("pid_mode") != "independent")
+        self._pid_mode_independent.setChecked(settings.get("pid_mode") == "independent")
+        self._a_kp_spin.setValue(settings["motor_a"]["kp"])
+        self._a_ki_spin.setValue(settings["motor_a"]["ki"])
+        self._a_kd_spin.setValue(settings["motor_a"]["kd"])
+        self._b_kp_spin.setValue(settings["motor_b"]["kp"])
+        self._b_ki_spin.setValue(settings["motor_b"]["ki"])
+        self._b_kd_spin.setValue(settings["motor_b"]["kd"])
+
+        for widget in all_widgets:
+            widget.blockSignals(False)
+
+    def _load_device_pid_a(self) -> None:
+        self._set_motor_pid_values("motor_a", self._device_pid["motor_a"])
+
+    def _load_device_pid_b(self) -> None:
+        self._set_motor_pid_values("motor_b", self._device_pid["motor_b"])
+
+    def _set_motor_pid_values(self, motor_key: str, values: dict[str, float]) -> None:
+        if motor_key == "motor_a":
+            spins = (self._a_kp_spin, self._a_ki_spin, self._a_kd_spin)
+        else:
+            spins = (self._b_kp_spin, self._b_ki_spin, self._b_kd_spin)
+        for spin, field in zip(spins, ("kp", "ki", "kd")):
+            spin.setValue(values[field])
 
     @staticmethod
     def _make_spin(min_val: float, max_val: float, decimals: int, step: float) -> QDoubleSpinBox:
