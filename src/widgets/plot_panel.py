@@ -11,6 +11,8 @@ from data_buffer import (
     COL_TGT_A, COL_TGT_B, COL_T_RAW_A, COL_T_RAW_B,
 )
 
+REPLAY_WINDOW_S = 10.0
+
 
 class PlotPanel(QWidget):
     """实时/回放绘图面板，包含速度图和 PWM 图。"""
@@ -114,6 +116,12 @@ class PlotPanel(QWidget):
         self._curves["tgt_B"].setData(time_arr, data[:, COL_TGT_B])
         self._curves["out_A"].setData(time_arr, data[:, COL_OUT_A])
         self._curves["out_B"].setData(time_arr, data[:, COL_OUT_B])
+
+    def follow_time_cursor(self, current_time: float) -> None:
+        """回放模式固定显示最近 10 秒窗口。"""
+        end = max(REPLAY_WINDOW_S, float(current_time))
+        start = max(0.0, end - REPLAY_WINDOW_S)
+        self._speed_plot.setXRange(start, end, padding=0.0)
 
     def reset(self) -> None:
         for curve in self._curves.values():

@@ -190,6 +190,8 @@ class MainWindow(QMainWindow):
     def _on_refresh(self) -> None:
         time_arr, data, frame, title, footer = self._current_source_payload()
         self._plot_panel.refresh_series(time_arr, data)
+        if self._data_mode == "replay" and self._replay_data is not None and len(time_arr) > 0:
+            self._plot_panel.follow_time_cursor(self._replay_current_time)
         self._data_panel.refresh_frame(frame, title=title, footer_text=footer)
         self._update_analysis(time_arr, data)
         self._sync_replay_slider()
