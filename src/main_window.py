@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSplitter,
     QTabWidget,
@@ -39,10 +41,13 @@ from widgets.serial_panel import SerialPanel
 class MainWindow(QMainWindow):
     """调试监视器主窗口。"""
 
+    _DEFAULT_WINDOW_WIDTH = 1400
+    _DEFAULT_WINDOW_HEIGHT = 760
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("WHEELTEC C50X 调试监视器")
-        self.resize(1400, 850)
+        self._apply_initial_window_size()
 
         self._buffer = DataBuffer()
         self._worker = SerialWorker(self._buffer)
@@ -54,9 +59,32 @@ class MainWindow(QMainWindow):
         self._replay_data: ReplayData | None = None
         self._replay_current_time = 0.0
         self._replay_speed = 1.0
+        self._initial_screen_fit_done = False
 
         self._setup_ui()
         self._setup_timers()
+        self._center_on_screen()
+
+    def _apply_initial_window_size(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(self._DEFAULT_WINDOW_WIDTH, self._DEFAULT_WINDOW_HEIGHT)
+            return
+
+        available = screen.availableGeometry()
+        self.resize(
+            min(self._DEFAULT_WINDOW_WIDTH, available.width()),
+            min(self._DEFAULT_WINDOW_HEIGHT, available.height()),
+        )
+
+    def _center_on_screen(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        frame_geometry = self.frameGeometry()
+        frame_geometry.moveCenter(screen.availableGeometry().center())
+        self.move(frame_geometry.topLeft())
 
     def _setup_ui(self) -> None:
         central = QWidget()
@@ -137,7 +165,12 @@ class MainWindow(QMainWindow):
         self._monitor_tabs.setCurrentWidget(self._param_panel)
         right_layout.addWidget(self._monitor_tabs, stretch=1)
 
-        mid_splitter.addWidget(self._right_sidebar)
+        self._right_sidebar_scroll = QScrollArea()
+        self._right_sidebar_scroll.setWidgetResizable(True)
+        self._right_sidebar_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._right_sidebar_scroll.setWidget(self._right_sidebar)
+
+        mid_splitter.addWidget(self._right_sidebar_scroll)
         mid_splitter.setStretchFactor(0, 7)
         mid_splitter.setStretchFactor(1, 3)
         main_layout.addWidget(mid_splitter, stretch=1)
@@ -373,6 +406,31 @@ class MainWindow(QMainWindow):
 
     def _set_data_mode_for_test(self, mode: str) -> None:
         self._set_data_mode(mode)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._initial_screen_fit_done:
+            return
+        self._fit_window_to_screen()
+        self._center_on_screen()
+        self._initial_screen_fit_done = True
+
+    def _fit_window_to_screen(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        geometry = self.geometry()
+        frame_extra_width = max(0, frame.width() - geometry.width())
+        frame_extra_height = max(0, frame.height() - geometry.height())
+        target_width = max(100, available.width() - frame_extra_width)
+        target_height = max(100, available.height() - frame_extra_height)
+        self.resize(
+            min(self.width(), target_width),
+            min(self.height(), target_height),
+        )
 
     def closeEvent(self, event) -> None:
         if self._buffer.recording:

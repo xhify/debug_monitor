@@ -14,6 +14,34 @@ class MainWindowReplayTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_main_window_uses_shorter_default_height(self) -> None:
+        window = MainWindow()
+        screen = window.screen() or self.app.primaryScreen()
+        available = screen.availableGeometry()
+
+        self.assertLessEqual(window.size().width(), available.width())
+        self.assertLessEqual(window.size().height(), available.height())
+
+    def test_main_window_starts_centered_on_available_screen(self) -> None:
+        window = MainWindow()
+        screen = window.screen() or self.app.primaryScreen()
+        available = screen.availableGeometry()
+        geometry = window.frameGeometry()
+
+        self.assertEqual(geometry.center().x(), available.center().x())
+        self.assertEqual(geometry.center().y(), available.center().y())
+
+    def test_shown_main_window_frame_fits_available_screen(self) -> None:
+        window = MainWindow()
+        window.show()
+        self.app.processEvents()
+        screen = window.screen() or self.app.primaryScreen()
+        available = screen.availableGeometry()
+        frame = window.frameGeometry()
+
+        self.assertLessEqual(frame.width(), available.width())
+        self.assertLessEqual(frame.height(), available.height())
+
     def test_monitor_panels_move_into_tabs_with_param_default(self) -> None:
         window = MainWindow()
 
