@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import errno
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -78,7 +80,12 @@ class RecordingSession:
         self._close()
         final_path = Path(final_path)
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        source.replace(final_path)
+        try:
+            source.replace(final_path)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
+                raise
+            shutil.move(str(source), str(final_path))
         self._temp_path = None
 
     def cancel(self) -> None:

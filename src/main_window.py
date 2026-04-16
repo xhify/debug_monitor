@@ -307,8 +307,7 @@ class MainWindow(QMainWindow):
             self._status_label.setText("记录已取消")
             return
 
-        kp, ki, kd = self._command_panel.current_pid_values_int()
-        default_name = f"debug_data_kp{kp}_ki{ki}_kd{kd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        default_name = self._recording_default_name()
         filepath, _ = QFileDialog.getSaveFileName(self, "保存记录数据", default_name, "CSV 文件 (*.csv)")
         if filepath:
             session.finalize(Path(filepath))
@@ -316,6 +315,15 @@ class MainWindow(QMainWindow):
         else:
             session.cancel()
             self._status_label.setText(f"记录已丢弃（{session.rows_written} 行）")
+
+    def _recording_default_name(self, timestamp: str | None = None) -> str:
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        (a_kp, a_ki, a_kd), (b_kp, b_ki, b_kd) = self._command_panel.current_motor_pid_values_int()
+        return (
+            f"debug_data_Akp{a_kp}_Aki{a_ki}_Akd{a_kd}_"
+            f"Bkp{b_kp}_Bki{b_ki}_Bkd{b_kd}_{timestamp}.csv"
+        )
 
     def _load_replay_csv(self) -> None:
         filepath, _ = QFileDialog.getOpenFileName(self, "加载 CSV 回放", "", "CSV 文件 (*.csv)")

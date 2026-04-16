@@ -50,6 +50,22 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertIs(window._monitor_tabs.currentWidget(), window._param_panel)
         self.assertIs(window._command_panel.parentWidget(), window._right_sidebar)
 
+    def test_recording_default_filename_includes_both_motor_pid_values(self) -> None:
+        window = MainWindow()
+        window._command_panel._a_kp_spin.setValue(4000)
+        window._command_panel._a_ki_spin.setValue(175)
+        window._command_panel._a_kd_spin.setValue(0)
+        window._command_panel._b_kp_spin.setValue(4100)
+        window._command_panel._b_ki_spin.setValue(200)
+        window._command_panel._b_kd_spin.setValue(1)
+
+        filename = window._recording_default_name("20260415_181442")
+
+        self.assertEqual(
+            filename,
+            "debug_data_Akp4000_Aki175_Akd0_Bkp4100_Bki200_Bkd1_20260415_181442.csv",
+        )
+
     def test_switching_to_replay_enables_replay_mode(self) -> None:
         window = MainWindow()
         window._set_replay_loaded_for_test(

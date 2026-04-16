@@ -293,6 +293,21 @@ class CommandPanel(QWidget):
             int(self._a_kd_spin.value()),
         )
 
+    def current_motor_pid_values_int(self) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+        """返回 A/B 两组 PID 值，按整数位导出用于文件名。"""
+        return (
+            (
+                int(self._a_kp_spin.value()),
+                int(self._a_ki_spin.value()),
+                int(self._a_kd_spin.value()),
+            ),
+            (
+                int(self._b_kp_spin.value()),
+                int(self._b_ki_spin.value()),
+                int(self._b_kd_spin.value()),
+            ),
+        )
+
     def _on_pid_mode_toggled(self) -> None:
         self._update_pid_mode_ui()
         self._save_current_pid_settings()

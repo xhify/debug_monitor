@@ -1,9 +1,11 @@
 import csv
+import errno
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -65,3 +67,23 @@ class RecordingSessionTests(unittest.TestCase):
             session.cancel()
 
             self.assertFalse(temp_path.exists())
+
+    def test_finalize_handles_cross_device_move(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = RecordingSession(base_dir=Path(tmp))
+            temp_path = session.start()
+            session.write_frame(frame_index=0, time_s=0.0, frame=make_frame())
+            final_path = Path(tmp) / "saved.csv"
+
+            with patch.object(
+                Path,
+                "replace",
+                side_effect=OSError(errno.EXDEV, "cross-device link"),
+            ):
+                session.finalize(final_path)
+
+            self.assertFalse(temp_path.exists())
+            self.assertTrue(final_path.exists())
+            with final_path.open("r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.reader(fh))
+            self.assertEqual(rows[1][0], "0")
