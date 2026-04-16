@@ -8,6 +8,9 @@ __pycache__/
 .worktrees/
 .superpowers/
 
+# Local agent planning notes
+docs/superpowers/plans/*.md
+
 # IDE
 .vscode/
 .idea/
@@ -15,6 +18,14 @@ __pycache__/
 # Data files
 *.csv
 settings/pid_config.json
+
+# local Matlab experiments
+csv_fft.m
+notch_filter_sysid.m
+matlab_pid/*.sid
+matlab_pid/imoprt_normal_csv.m
+matlab_pid/import_imp_csv.m
+matlab_pid/system_identidication_learn0.m
 
 # OS
 Thumbs.db
