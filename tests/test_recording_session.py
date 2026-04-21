@@ -1,9 +1,11 @@
 import csv
 import errno
 import os
+import shutil
 import sys
-import tempfile
 import unittest
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +13,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from protocol import DataFrame
 from recording_session import RecordingSession
+
+
+TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / ".test_tmp"
+
+
+@contextmanager
+def temp_dir():
+    TEST_TMP_ROOT.mkdir(exist_ok=True)
+    path = TEST_TMP_ROOT / f"recording_{uuid.uuid4().hex}"
+    path.mkdir()
+    try:
+        yield str(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def make_frame() -> DataFrame:
@@ -32,7 +48,7 @@ def make_frame() -> DataFrame:
 
 class RecordingSessionTests(unittest.TestCase):
     def test_start_write_finalize_moves_temp_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with temp_dir() as tmp:
             session = RecordingSession(base_dir=Path(tmp))
             temp_path = session.start()
             session.write_frame(frame_index=0, time_s=0.0, frame=make_frame())
@@ -59,7 +75,7 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertEqual(rows[1][0], "0")
 
     def test_cancel_deletes_temp_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with temp_dir() as tmp:
             session = RecordingSession(base_dir=Path(tmp))
             temp_path = session.start()
             session.write_frame(frame_index=0, time_s=0.0, frame=make_frame())
@@ -69,7 +85,7 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertFalse(temp_path.exists())
 
     def test_finalize_handles_cross_device_move(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with temp_dir() as tmp:
             session = RecordingSession(base_dir=Path(tmp))
             temp_path = session.start()
             session.write_frame(frame_index=0, time_s=0.0, frame=make_frame())

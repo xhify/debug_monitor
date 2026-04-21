@@ -5,21 +5,28 @@
 from __future__ import annotations
 
 import tempfile
+import json
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QFileDialog,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSlider,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -33,6 +40,7 @@ from serial_worker import SerialWorker
 from widgets.analysis_panel import AnalysisPanel
 from widgets.command_panel import CommandPanel
 from widgets.data_panel import DataPanel
+from widgets.imu_panel import ImuPanel
 from widgets.param_panel import ParamPanel
 from widgets.plot_panel import PlotPanel
 from widgets.serial_panel import SerialPanel
@@ -60,6 +68,10 @@ class MainWindow(QMainWindow):
         self._replay_current_time = 0.0
         self._replay_speed = 1.0
         self._initial_screen_fit_done = False
+        self._summary_rows: dict[str, dict[str, object]] = {}
+        self._summary_last_counts: dict[str, tuple[float, int]] = {}
+        self._summary_encoder_session: RecordingSession | None = None
+        self._summary_session_dir: Path | None = None
 
         self._setup_ui()
         self._setup_timers()
@@ -89,8 +101,18 @@ class MainWindow(QMainWindow):
     def _setup_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(4, 4, 4, 4)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(4, 4, 4, 4)
+        root_layout.setSpacing(4)
+
+        self._setup_module_switcher(root_layout)
+
+        self._module_stack = QStackedWidget()
+        root_layout.addWidget(self._module_stack, stretch=1)
+
+        self._encoder_page = QWidget()
+        main_layout = QVBoxLayout(self._encoder_page)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(4)
 
         self._serial_panel = SerialPanel()
@@ -175,6 +197,13 @@ class MainWindow(QMainWindow):
         mid_splitter.setStretchFactor(1, 3)
         main_layout.addWidget(mid_splitter, stretch=1)
 
+        self._imu_panel = ImuPanel()
+        self._summary_page = self._build_summary_page()
+        self._module_stack.addWidget(self._summary_page)
+        self._module_stack.addWidget(self._encoder_page)
+        self._module_stack.addWidget(self._imu_panel)
+        self._module_stack.setCurrentWidget(self._encoder_page)
+
         self._status_label = QLabel("就绪")
         self.statusBar().addWidget(self._status_label, stretch=1)
         self._frame_label = QLabel("帧: 0")
@@ -185,6 +214,298 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._record_label)
 
         self._replay_controls_enabled(False)
+
+    def _setup_module_switcher(self, root_layout: QVBoxLayout) -> None:
+        switch_row = QHBoxLayout()
+        switch_row.setContentsMargins(0, 0, 0, 0)
+
+        self._module_button_group = QButtonGroup(self)
+        self._module_button_group.setExclusive(True)
+
+        self._summary_module_btn = QPushButton("汇总")
+        self._summary_module_btn.setCheckable(True)
+        self._summary_module_btn.clicked.connect(lambda: self._switch_module("summary"))
+        self._module_button_group.addButton(self._summary_module_btn)
+        switch_row.addWidget(self._summary_module_btn)
+
+        self._encoder_module_btn = QPushButton("编码器")
+        self._encoder_module_btn.setCheckable(True)
+        self._encoder_module_btn.setChecked(True)
+        self._encoder_module_btn.clicked.connect(lambda: self._switch_module("encoder"))
+        self._module_button_group.addButton(self._encoder_module_btn)
+        switch_row.addWidget(self._encoder_module_btn)
+
+        self._imu_module_btn = QPushButton("IMU")
+        self._imu_module_btn.setCheckable(True)
+        self._imu_module_btn.clicked.connect(lambda: self._switch_module("imu"))
+        self._module_button_group.addButton(self._imu_module_btn)
+        switch_row.addWidget(self._imu_module_btn)
+
+        switch_row.addStretch()
+        root_layout.addLayout(switch_row)
+
+    def _switch_module(self, module: str) -> None:
+        if module == "summary":
+            self._module_stack.setCurrentWidget(self._summary_page)
+            self._status_label.setText("汇总模块")
+            return
+        if module == "imu":
+            self._module_stack.setCurrentWidget(self._imu_panel)
+            self._status_label.setText("IMU 模块")
+            return
+        self._module_stack.setCurrentWidget(self._encoder_page)
+        self._status_label.setText("编码器模块")
+
+    def _build_summary_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        layout.addWidget(self._build_summary_device_group("encoder", "编码器", [115200, 9600, 19200, 38400, 57600, 230400, 460800]))
+        layout.addWidget(self._build_summary_device_group("imu_A", "IMU A", [460800, 230400, 115200, 57600, 38400, 19200, 9600, 921600]))
+        layout.addWidget(self._build_summary_device_group("imu_B", "IMU B", [460800, 230400, 115200, 57600, 38400, 19200, 9600, 921600]))
+
+        record_group = QGroupBox("同步记录")
+        record_layout = QVBoxLayout(record_group)
+        note_row = QHBoxLayout()
+        note_row.addWidget(QLabel("备注:"))
+        self._summary_note_edit = QPlainTextEdit()
+        self._summary_note_edit.setPlaceholderText("说明本次记录内容，例如路面、速度、控制参数、实验目的")
+        self._summary_note_edit.setFixedHeight(72)
+        note_row.addWidget(self._summary_note_edit, stretch=1)
+        record_layout.addLayout(note_row)
+
+        button_row = QHBoxLayout()
+        self._summary_record_btn = QPushButton("全部开始记录")
+        self._summary_record_btn.clicked.connect(self._toggle_summary_recording)
+        button_row.addWidget(self._summary_record_btn)
+        self._summary_record_status_label = QLabel("")
+        button_row.addWidget(self._summary_record_status_label, stretch=1)
+        record_layout.addLayout(button_row)
+        layout.addWidget(record_group)
+        layout.addStretch()
+
+        for key in ("encoder", "imu_A", "imu_B"):
+            self._refresh_summary_ports(key)
+        return page
+
+    def _build_summary_device_group(self, key: str, title: str, bauds: list[int]) -> QGroupBox:
+        group = QGroupBox(title)
+        grid = QGridLayout(group)
+
+        port_combo = QComboBox()
+        port_combo.setEditable(True)
+        port_combo.setMinimumWidth(180)
+        baud_combo = QComboBox()
+        for baud in bauds:
+            baud_combo.addItem(str(baud), baud)
+
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(lambda: self._refresh_summary_ports(key))
+        connect_btn = QPushButton("连接")
+        connect_btn.clicked.connect(lambda: self._connect_summary_device(key))
+        disconnect_btn = QPushButton("断开")
+        disconnect_btn.clicked.connect(lambda: self._disconnect_summary_device(key))
+        disconnect_btn.setEnabled(False)
+
+        status_label = QLabel("未连接")
+        frame_label = QLabel("0")
+        error_label = QLabel("0")
+        hz_label = QLabel("---")
+
+        grid.addWidget(QLabel("端口"), 0, 0)
+        grid.addWidget(port_combo, 0, 1)
+        grid.addWidget(QLabel("波特率"), 0, 2)
+        grid.addWidget(baud_combo, 0, 3)
+        grid.addWidget(refresh_btn, 0, 4)
+        grid.addWidget(connect_btn, 0, 5)
+        grid.addWidget(disconnect_btn, 0, 6)
+        grid.addWidget(QLabel("状态"), 1, 0)
+        grid.addWidget(status_label, 1, 1)
+        grid.addWidget(QLabel("帧数"), 1, 2)
+        grid.addWidget(frame_label, 1, 3)
+        grid.addWidget(QLabel("错误"), 1, 4)
+        grid.addWidget(error_label, 1, 5)
+        grid.addWidget(QLabel("频率"), 1, 6)
+        grid.addWidget(hz_label, 1, 7)
+
+        self._summary_rows[key] = {
+            "port_combo": port_combo,
+            "baud_combo": baud_combo,
+            "refresh_btn": refresh_btn,
+            "connect_btn": connect_btn,
+            "disconnect_btn": disconnect_btn,
+            "status_label": status_label,
+            "frame_label": frame_label,
+            "error_label": error_label,
+            "hz_label": hz_label,
+        }
+        return group
+
+    def _refresh_summary_ports(self, key: str) -> None:
+        row = self._summary_rows[key]
+        combo: QComboBox = row["port_combo"]
+        current_text = combo.currentText()
+        combo.clear()
+        ports = SerialWorker.list_ports()
+        for device, description in ports:
+            combo.addItem(f"{device} - {description}", device)
+        if current_text and combo.findText(current_text) < 0:
+            combo.setEditText(current_text)
+
+    def _summary_port(self, key: str) -> str:
+        combo: QComboBox = self._summary_rows[key]["port_combo"]
+        port = combo.currentData()
+        if port:
+            return str(port)
+        text = combo.currentText().strip()
+        return text.split(" - ")[0] if " - " in text else text
+
+    def _summary_baudrate(self, key: str) -> int:
+        combo: QComboBox = self._summary_rows[key]["baud_combo"]
+        return int(combo.currentData())
+
+    def _connect_summary_device(self, key: str) -> None:
+        port = self._summary_port(key)
+        if not port:
+            self._summary_rows[key]["status_label"].setText("请选择串口")
+            return
+        baudrate = self._summary_baudrate(key)
+        if key == "encoder":
+            self._set_combo_value(self._serial_panel._port_combo, port)
+            self._set_combo_value(self._serial_panel._baud_combo, str(baudrate))
+            self._on_connect(port, baudrate)
+            return
+
+        device_key = "A" if key == "imu_A" else "B"
+        device = self._imu_panel._devices[device_key]
+        self._set_combo_value(device.port_combo, port)
+        self._set_combo_value(device.baud_combo, str(baudrate))
+        self._imu_panel._on_connect(device_key)
+
+    def _disconnect_summary_device(self, key: str) -> None:
+        if key == "encoder":
+            self._on_disconnect()
+            return
+        device_key = "A" if key == "imu_A" else "B"
+        self._imu_panel._on_disconnect(device_key)
+
+    @staticmethod
+    def _set_combo_value(combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif combo.isEditable():
+            combo.setEditText(value)
+
+    def _toggle_summary_recording(self) -> None:
+        if self._summary_encoder_session is None:
+            self._start_summary_recording()
+            return
+        self._stop_summary_recording(save=True)
+
+    def _start_summary_recording(
+        self,
+        base_dir: Path | None = None,
+        timestamp: str | None = None,
+    ) -> Path:
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if base_dir is None:
+            base_dir = Path.cwd() / "recordings"
+        session_dir = self._create_summary_session_dir(Path(base_dir), timestamp)
+
+        encoder_session = RecordingSession(base_dir=session_dir)
+        encoder_session.start()
+        self._buffer.start_recording(encoder_session)
+        self._summary_encoder_session = encoder_session
+        self._summary_session_dir = session_dir
+
+        note = self._summary_note_edit.toPlainText().strip()
+        self._imu_panel.start_recording_in_directory(session_dir, started_at=timestamp, note=note)
+        self._write_summary_metadata(session_dir=session_dir, started_at=timestamp, note=note)
+
+        self._record_btn.setText("停止记录")
+        self._record_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+        self._summary_record_btn.setText("全部停止记录")
+        self._summary_record_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+        self._summary_record_status_label.setText(f"记录中: {session_dir}")
+        self._status_label.setText("正在同步记录编码器和 IMU...")
+        return session_dir
+
+    def _create_summary_session_dir(self, base_dir: Path, timestamp: str) -> Path:
+        base_dir.mkdir(parents=True, exist_ok=True)
+        for counter in range(1000):
+            suffix = "" if counter == 0 else f"_{counter:03d}"
+            path = base_dir / f"session_{timestamp}{suffix}"
+            try:
+                path.mkdir()
+                return path
+            except FileExistsError:
+                continue
+        raise RuntimeError("无法创建同步记录目录")
+
+    def _write_summary_metadata(self, session_dir: Path, started_at: str, note: str) -> None:
+        metadata = {
+            "started_at": started_at,
+            "note": note,
+            "devices": {
+                "encoder": {
+                    "port": self._summary_port("encoder"),
+                    "baudrate": self._summary_baudrate("encoder"),
+                },
+                "imu_A": {
+                    "port": self._summary_port("imu_A"),
+                    "baudrate": self._summary_baudrate("imu_A"),
+                },
+                "imu_B": {
+                    "port": self._summary_port("imu_B"),
+                    "baudrate": self._summary_baudrate("imu_B"),
+                },
+            },
+            "files": {
+                "encoder": "encoder.csv",
+                "imu_A": "imu_A.csv",
+                "imu_B": "imu_B.csv",
+                "imu_metadata": "imu_session.json",
+                "imu_aligned": "imu_merged_aligned.csv",
+            },
+        }
+        with (session_dir / "session.json").open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+
+    def _stop_summary_recording(self, save: bool) -> Path | None:
+        encoder_session = self._summary_encoder_session
+        session_dir = self._summary_session_dir
+        self._summary_encoder_session = None
+        self._summary_session_dir = None
+
+        self._record_btn.setText("开始记录")
+        self._record_btn.setStyleSheet("")
+        self._summary_record_btn.setText("全部开始记录")
+        self._summary_record_btn.setStyleSheet("")
+
+        stopped_encoder_session = self._buffer.stop_recording()
+        if encoder_session is None:
+            encoder_session = stopped_encoder_session
+
+        if save and session_dir is not None:
+            if encoder_session is not None:
+                encoder_session.finalize(session_dir / "encoder.csv")
+            self._imu_panel.stop_recording(save=True)
+            self._summary_record_status_label.setText(f"已保存: {session_dir}")
+            self._status_label.setText(f"同步记录已保存: {session_dir}")
+            return session_dir
+
+        if encoder_session is not None:
+            encoder_session.cancel()
+        self._imu_panel.stop_recording(save=False)
+        self._summary_record_status_label.setText("同步记录已取消")
+        self._status_label.setText("同步记录已取消")
+        return None
 
     def _setup_timers(self) -> None:
         self._refresh_timer = QTimer(self)
@@ -204,7 +525,9 @@ class MainWindow(QMainWindow):
         self._worker.open_port(port, baudrate)
 
     def _on_disconnect(self) -> None:
-        if self._buffer.recording:
+        if self._summary_encoder_session is not None:
+            self._stop_summary_recording(save=False)
+        elif self._buffer.recording:
             self._stop_recording_session(save=False)
         self._worker.close_port()
 
@@ -280,6 +603,60 @@ class MainWindow(QMainWindow):
             self._record_label.setText(f"记录中: {self._buffer.csv_rows_written} 行")
         else:
             self._record_label.setText("")
+        self._update_summary_status()
+
+    def _update_summary_status(self) -> None:
+        self._update_summary_row(
+            key="encoder",
+            connected=self._serial_connected(self._worker),
+            frame_count=self._buffer.frame_index,
+            error_count=self._worker.error_count,
+        )
+        for summary_key, device_key in (("imu_A", "A"), ("imu_B", "B")):
+            device = self._imu_panel._devices[device_key]
+            self._update_summary_row(
+                key=summary_key,
+                connected=self._serial_connected(device.worker),
+                frame_count=device.buffer.frame_index,
+                error_count=device.worker.error_count,
+            )
+        if self._summary_encoder_session is not None:
+            imu_rows = self._imu_panel.recording_rows_text()
+            encoder_rows = self._buffer.csv_rows_written
+            self._summary_record_status_label.setText(
+                f"记录中: 编码器 {encoder_rows} 行, IMU {imu_rows}"
+            )
+
+    def _update_summary_row(self, key: str, connected: bool, frame_count: int, error_count: int) -> None:
+        row = self._summary_rows[key]
+        row["status_label"].setText("正常接收" if connected and frame_count > 0 else ("已连接" if connected else "未连接"))
+        row["status_label"].setStyleSheet("color: green;" if connected else "color: red;")
+        row["frame_label"].setText(str(frame_count))
+        row["error_label"].setText(str(error_count))
+        row["hz_label"].setText(self._summary_hz_text(key, frame_count))
+        row["connect_btn"].setEnabled(not connected)
+        row["disconnect_btn"].setEnabled(connected)
+        row["port_combo"].setEnabled(not connected)
+        row["baud_combo"].setEnabled(not connected)
+        row["refresh_btn"].setEnabled(not connected)
+
+    def _summary_hz_text(self, key: str, frame_count: int) -> str:
+        now = perf_counter()
+        previous = self._summary_last_counts.get(key)
+        self._summary_last_counts[key] = (now, frame_count)
+        if previous is None:
+            return "---"
+        previous_time, previous_count = previous
+        elapsed = now - previous_time
+        if elapsed <= 0:
+            return "---"
+        hz = (frame_count - previous_count) / elapsed
+        return f"{max(0.0, hz):.0f} Hz"
+
+    @staticmethod
+    def _serial_connected(worker) -> bool:
+        serial_port = getattr(worker, "_serial", None)
+        return bool(serial_port is not None and serial_port.is_open)
 
     def _toggle_record(self) -> None:
         if not self._buffer.recording:
@@ -396,7 +773,9 @@ class MainWindow(QMainWindow):
         self._replay_speed = float(self._speed_combo.currentData())
 
     def _clear_data(self) -> None:
-        if self._buffer.recording:
+        if self._summary_encoder_session is not None:
+            self._stop_summary_recording(save=False)
+        elif self._buffer.recording:
             self._stop_recording_session(save=False)
         self._buffer.clear()
         if self._data_mode == "replay":
@@ -441,10 +820,13 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
-        if self._buffer.recording:
+        if self._summary_encoder_session is not None:
+            self._stop_summary_recording(save=False)
+        elif self._buffer.recording:
             self._stop_recording_session(save=False)
         self._refresh_timer.stop()
         self._status_timer.stop()
         self._replay_timer.stop()
         self._worker.close_port()
+        self._imu_panel.shutdown()
         super().closeEvent(event)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import errno
 import shutil
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -39,22 +38,23 @@ class RecordingSession:
     def start(self) -> Path:
         self._base_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        handle = tempfile.NamedTemporaryFile(
-            mode="w",
-            newline="",
-            encoding="utf-8",
-            prefix=f"recording_{timestamp}_",
-            suffix=".tmp.csv",
-            dir=self._base_dir,
-            delete=False,
-        )
+        temp_path, handle = self._create_temp_file(timestamp)
         self._file = handle
-        self._temp_path = Path(handle.name)
+        self._temp_path = temp_path
         self._writer = csv.writer(handle)
         self._writer.writerow(CSV_HEADER)
         handle.flush()
         self.rows_written = 0
         return self._temp_path
+
+    def _create_temp_file(self, timestamp: str):
+        for counter in range(1000):
+            temp_path = self._base_dir / f"recording_{timestamp}_{counter:03d}.tmp.csv"
+            try:
+                return temp_path, temp_path.open("x", newline="", encoding="utf-8")
+            except FileExistsError:
+                continue
+        raise RuntimeError("could not create temporary recording file")
 
     def write_frame(self, frame_index: int, time_s: float, frame: DataFrame) -> None:
         if self._file is None or self._writer is None:

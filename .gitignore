@@ -17,6 +17,7 @@ docs/superpowers/plans/*.md
 
 # Data files
 *.csv
+recordings/
 settings/pid_config.json
 
 # local Matlab experiments
@@ -33,3 +34,4 @@ Thumbs.db
 
 # Test scratch
 tests/_tmp_command_panel/
+.test_tmp/

@@ -1,8 +1,10 @@
 import csv
 import os
+import shutil
 import sys
-import tempfile
 import unittest
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -10,9 +12,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from replay_data import ReplayData
 
 
+TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / ".test_tmp"
+
+
+@contextmanager
+def temp_dir():
+    TEST_TMP_ROOT.mkdir(exist_ok=True)
+    path = TEST_TMP_ROOT / f"replay_{uuid.uuid4().hex}"
+    path.mkdir()
+    try:
+        yield str(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 class ReplayDataTests(unittest.TestCase):
     def test_load_csv_and_read_latest_row(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with temp_dir() as tmp:
             path = Path(tmp) / "sample.csv"
             with path.open("w", encoding="utf-8", newline="") as fh:
                 writer = csv.writer(fh)
@@ -38,7 +54,7 @@ class ReplayDataTests(unittest.TestCase):
             self.assertEqual(latest["afc_output_A"], 0.0)
 
     def test_load_csv_with_afc_columns_reads_afc_values(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with temp_dir() as tmp:
             path = Path(tmp) / "sample_with_afc.csv"
             with path.open("w", encoding="utf-8", newline="") as fh:
                 writer = csv.writer(fh)
@@ -62,7 +78,7 @@ class ReplayDataTests(unittest.TestCase):
             self.assertEqual(latest["afc_output_B"], 13.5)
 
     def test_missing_columns_raise_value_error(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with temp_dir() as tmp:
             path = Path(tmp) / "bad.csv"
             with path.open("w", encoding="utf-8", newline="") as fh:
                 writer = csv.writer(fh)

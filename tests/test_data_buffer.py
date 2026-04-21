@@ -1,7 +1,9 @@
 import os
+import shutil
 import sys
-import tempfile
 import unittest
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -9,6 +11,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from data_buffer import COL_FINAL_A, DataBuffer
 from protocol import DataFrame
 from recording_session import RecordingSession
+
+
+TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / ".test_tmp"
+
+
+@contextmanager
+def temp_dir():
+    TEST_TMP_ROOT.mkdir(exist_ok=True)
+    path = TEST_TMP_ROOT / f"data_buffer_{uuid.uuid4().hex}"
+    path.mkdir()
+    try:
+        yield str(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def make_frame(index: int) -> DataFrame:
@@ -41,7 +57,7 @@ class DataBufferTests(unittest.TestCase):
         self.assertAlmostEqual(data[-1, COL_FINAL_A], 1499.0, places=2)
 
     def test_append_writes_to_active_recording_session(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with temp_dir() as tmp:
             session = RecordingSession(base_dir=Path(tmp))
             session.start()
             buffer = DataBuffer()
