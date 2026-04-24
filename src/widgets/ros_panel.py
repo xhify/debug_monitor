@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import tempfile
+from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+import pyqtgraph as pg
 
 from ros_bridge_worker import RosSnapshot
 from ros_data import RosCsvRecordingSession, RosTimeSeriesBuffer
@@ -36,7 +38,13 @@ class RosPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._labels: dict[str, QLabel] = {}
+        self._field_labels: dict[str, QLabel] = {}
+        self._speed_labels: dict[str, QLabel] = {}
+        self._speed_curves: dict[str, pg.PlotDataItem] = {}
         self._buffer = RosTimeSeriesBuffer()
+        self._target_speed_rows: deque[tuple[float, float, float]] = deque(maxlen=3000)
+        self._target_left_speed = 0.0
+        self._target_right_speed = 0.0
         self._recording_session: RosCsvRecordingSession | None = None
         self._pending_snapshot: RosSnapshot | None = None
         self._setup_ui()
@@ -82,8 +90,8 @@ class RosPanel(QWidget):
         data_grid = QGridLayout(data_group)
         rows = [
             ("帧数", "frame_count", ""),
-            ("线速度 X", "linear_x", "m/s"),
-            ("线速度 Y", "linear_y", "m/s"),
+            ("电机A左轮速度", "linear_x", "m/s"),
+            ("电机B右轮速度", "linear_y", "m/s"),
             ("角速度 Z", "angular_z", "rad/s"),
             ("位置 X", "pose_x", "m"),
             ("位置 Y", "pose_y", "m"),
@@ -92,7 +100,9 @@ class RosPanel(QWidget):
             ("电压", "voltage", "V"),
         ]
         for row, (label, key, unit) in enumerate(rows):
-            data_grid.addWidget(QLabel(label), row, 0)
+            field_label = QLabel(label)
+            data_grid.addWidget(field_label, row, 0)
+            self._field_labels[key] = field_label
             value_label = QLabel("---")
             value_label.setMinimumWidth(100)
             data_grid.addWidget(value_label, row, 1)
@@ -124,7 +134,7 @@ class RosPanel(QWidget):
         self._send_cmd_vel_btn.clicked.connect(self._on_send_cmd_vel)
         button_row.addWidget(self._send_cmd_vel_btn)
         self._stop_cmd_vel_btn = QPushButton("停止")
-        self._stop_cmd_vel_btn.clicked.connect(lambda: self.cmd_vel_requested.emit(0.0, 0.0))
+        self._stop_cmd_vel_btn.clicked.connect(self._on_stop_cmd_vel)
         button_row.addWidget(self._stop_cmd_vel_btn)
         button_row.addStretch()
         cmd_form.addRow(button_row)
@@ -142,24 +152,22 @@ class RosPanel(QWidget):
 
         pid_button_row = QHBoxLayout()
         self._pid_forward_btn = QPushButton("PID 前进")
-        self._pid_forward_btn.clicked.connect(
-            lambda: self.pid_control_requested.emit(self._pid_linear_x_spin.value(), True, False)
-        )
+        self._pid_forward_btn.clicked.connect(self._on_pid_forward)
         pid_button_row.addWidget(self._pid_forward_btn)
 
         self._pid_backward_btn = QPushButton("PID 后退")
-        self._pid_backward_btn.clicked.connect(
-            lambda: self.pid_control_requested.emit(self._pid_linear_x_spin.value(), False, True)
-        )
+        self._pid_backward_btn.clicked.connect(self._on_pid_backward)
         pid_button_row.addWidget(self._pid_backward_btn)
 
         self._pid_stop_btn = QPushButton("PID 停止")
-        self._pid_stop_btn.clicked.connect(lambda: self.pid_control_requested.emit(0.0, False, False))
+        self._pid_stop_btn.clicked.connect(self._on_pid_stop)
         pid_button_row.addWidget(self._pid_stop_btn)
         pid_button_row.addStretch()
         pid_form.addRow(pid_button_row)
         control_column.addWidget(pid_group)
         control_column.addStretch()
+        self._speed_group = self._build_speed_monitor_group()
+        control_column.addWidget(self._speed_group)
         content_row.addLayout(control_column, stretch=3)
         layout.addLayout(content_row, stretch=1)
 
@@ -172,6 +180,56 @@ class RosPanel(QWidget):
         record_layout.addWidget(self._record_status_label, stretch=1)
         layout.addWidget(record_group)
         layout.addStretch()
+
+    def _build_speed_monitor_group(self) -> QGroupBox:
+        group = QGroupBox("速度监视")
+        layout = QVBoxLayout(group)
+
+        self._speed_plot = pg.PlotWidget()
+        self._speed_plot.setBackground("w")
+        self._speed_plot.showGrid(x=True, y=True, alpha=0.3)
+        self._speed_plot.setLabel("left", "速度", units="m/s")
+        self._speed_plot.setLabel("bottom", "时间", units="s")
+        self._speed_plot.addLegend(offset=(10, 10))
+        self._speed_plot.getPlotItem().setDownsampling(mode="peak")
+        self._speed_plot.getPlotItem().setClipToView(True)
+        for key, name, color, width, style in (
+            ("actual_left", "实际左轮", "#1f77b4", 1.8, None),
+            ("actual_right", "实际右轮", "#ff7f0e", 1.8, None),
+            ("target_left", "目标左轮", "#1f77b4", 1.3, Qt.DashLine),
+            ("target_right", "目标右轮", "#ff7f0e", 1.3, Qt.DashLine),
+        ):
+            pen_kwargs = {"color": color, "width": width}
+            if style is not None:
+                pen_kwargs["style"] = style
+            self._speed_curves[key] = self._speed_plot.plot(
+                pen=pg.mkPen(**pen_kwargs),
+                name=name,
+            )
+        layout.addWidget(self._speed_plot, stretch=1)
+
+        grid = QGridLayout()
+        grid.addWidget(QLabel(""), 0, 0)
+        grid.addWidget(QLabel("实际速度"), 0, 1)
+        grid.addWidget(QLabel("目标速度"), 0, 2)
+        rows = [
+            ("左轮 / 电机A", "actual_left", "target_left"),
+            ("右轮 / 电机B", "actual_right", "target_right"),
+        ]
+        for row, (title, actual_key, target_key) in enumerate(rows, start=1):
+            grid.addWidget(QLabel(title), row, 0)
+            actual_label = QLabel("---")
+            actual_label.setMinimumWidth(90)
+            grid.addWidget(actual_label, row, 1)
+            target_label = QLabel("0.0000")
+            target_label.setMinimumWidth(90)
+            grid.addWidget(target_label, row, 2)
+            self._speed_labels[actual_key] = actual_label
+            self._speed_labels[target_key] = target_label
+        grid.addWidget(QLabel("m/s"), 1, 3)
+        grid.addWidget(QLabel("m/s"), 2, 3)
+        layout.addLayout(grid)
+        return group
 
     def set_connected(self, connected: bool) -> None:
         self._connect_btn.setEnabled(not connected)
@@ -188,6 +246,7 @@ class RosPanel(QWidget):
 
     def update_snapshot(self, snapshot: RosSnapshot) -> None:
         time_s = self._buffer.append(snapshot)
+        self._target_speed_rows.append((time_s, self._target_left_speed, self._target_right_speed))
         self._pending_snapshot = snapshot
         if self._recording_session is not None:
             self._recording_session.write_snapshot(time_s=time_s, snapshot=snapshot)
@@ -218,6 +277,9 @@ class RosPanel(QWidget):
         self._labels["frame_count"].setText(str(snapshot.frame_count))
         for key in ("linear_x", "linear_y", "angular_z", "pose_x", "pose_y", "accel_z", "gyro_z"):
             self._labels[key].setText(f"{getattr(snapshot, key):.4f}")
+        self._speed_labels["actual_left"].setText(f"{snapshot.linear_x:.4f}")
+        self._speed_labels["actual_right"].setText(f"{snapshot.linear_y:.4f}")
+        self._refresh_speed_plot()
         self._labels["voltage"].setText(f"{snapshot.voltage:.2f}")
         if self._recording_session is not None:
             self._record_status_label.setText(f"记录中: {self._recording_session.rows_written} 行")
@@ -230,7 +292,52 @@ class RosPanel(QWidget):
         self.connect_requested.emit(host, self._port_spin.value())
 
     def _on_send_cmd_vel(self) -> None:
-        self.cmd_vel_requested.emit(self._linear_x_spin.value(), self._angular_z_spin.value())
+        linear_x = self._linear_x_spin.value()
+        self._set_target_speed_labels(linear_x, linear_x)
+        self.cmd_vel_requested.emit(linear_x, self._angular_z_spin.value())
+
+    def _on_stop_cmd_vel(self) -> None:
+        self._set_target_speed_labels(0.0, 0.0)
+        self.cmd_vel_requested.emit(0.0, 0.0)
+
+    def _on_pid_forward(self) -> None:
+        target = self._pid_linear_x_spin.value()
+        self._set_target_speed_labels(target, target)
+        self.pid_control_requested.emit(target, True, False)
+
+    def _on_pid_backward(self) -> None:
+        target = -self._pid_linear_x_spin.value()
+        self._set_target_speed_labels(target, target)
+        self.pid_control_requested.emit(abs(target), False, True)
+
+    def _on_pid_stop(self) -> None:
+        self._set_target_speed_labels(0.0, 0.0)
+        self.pid_control_requested.emit(0.0, False, False)
+
+    def _set_target_speed_labels(self, left: float, right: float) -> None:
+        self._target_left_speed = left
+        self._target_right_speed = right
+        self._speed_labels["target_left"].setText(f"{left:.4f}")
+        self._speed_labels["target_right"].setText(f"{right:.4f}")
+        self._refresh_speed_plot()
+
+    def _refresh_speed_plot(self) -> None:
+        time_arr, data = self._buffer.snapshot()
+        if len(time_arr) == 0:
+            for curve in self._speed_curves.values():
+                curve.setData([], [])
+            return
+
+        target_left = [row[1] for row in self._target_speed_rows]
+        target_right = [row[2] for row in self._target_speed_rows]
+        self._speed_curves["actual_left"].setData(time_arr, data["linear_x"])
+        self._speed_curves["actual_right"].setData(time_arr, data["linear_y"])
+        self._speed_curves["target_left"].setData(time_arr, target_left[-len(time_arr):])
+        self._speed_curves["target_right"].setData(time_arr, target_right[-len(time_arr):])
+
+        latest_time = float(time_arr[-1])
+        x_max = max(10.0, latest_time)
+        self._speed_plot.setXRange(max(0.0, x_max - 10.0), x_max, padding=0.0)
 
     def _toggle_recording(self) -> None:
         if self._recording_session is None:

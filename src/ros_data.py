@@ -28,8 +28,8 @@ ROS_SERIES_KEYS = [
 ROS_CSV_HEADER = [
     "time_s",
     "frame_count",
-    "linear_x",
-    "linear_y",
+    "motor_a_left_speed",
+    "motor_b_right_speed",
     "angular_z",
     "pose_x",
     "pose_y",
@@ -59,8 +59,8 @@ ROS_IMU_SERIES_KEYS = (
 ROS_SUMMARY_ODOM_HEADER = [
     "time_s",
     "frame_count",
-    "linear_x",
-    "linear_y",
+    "motor_a_left_speed",
+    "motor_b_right_speed",
     "angular_z",
     "pose_x",
     "pose_y",
@@ -73,21 +73,34 @@ ROS_SUMMARY_ODOM_HEADER = [
 
 ROS_SUMMARY_IMU_HEADER = [
     "time_s",
-    "topic",
-    "frame_count",
-    "accel_x",
-    "accel_y",
-    "accel_z",
-    "gyro_x",
-    "gyro_y",
-    "gyro_z",
-    "orientation_x",
-    "orientation_y",
-    "orientation_z",
-    "orientation_w",
-    "roll_deg",
-    "pitch_deg",
-    "yaw_deg",
+    "imu_frame_count",
+    "imu_accel_x",
+    "imu_accel_y",
+    "imu_accel_z",
+    "imu_gyro_x",
+    "imu_gyro_y",
+    "imu_gyro_z",
+    "imu_orientation_x",
+    "imu_orientation_y",
+    "imu_orientation_z",
+    "imu_orientation_w",
+    "imu_roll_deg",
+    "imu_pitch_deg",
+    "imu_yaw_deg",
+    "active_imu_frame_count",
+    "active_imu_accel_x",
+    "active_imu_accel_y",
+    "active_imu_accel_z",
+    "active_imu_gyro_x",
+    "active_imu_gyro_y",
+    "active_imu_gyro_z",
+    "active_imu_orientation_x",
+    "active_imu_orientation_y",
+    "active_imu_orientation_z",
+    "active_imu_orientation_w",
+    "active_imu_roll_deg",
+    "active_imu_pitch_deg",
+    "active_imu_yaw_deg",
 ]
 
 
@@ -329,10 +342,19 @@ class RosSummaryRecordingSession:
     def _write_imu(self, time_s: float, snapshot: RosSnapshot) -> None:
         if self._imu_writer is None:
             raise RuntimeError("recording not started")
-        reading = getattr(snapshot, self.IMU_TOPICS[snapshot.last_topic])
         self._imu_writer.writerow([
             f"{time_s:.3f}",
-            snapshot.last_topic,
+            *self._imu_reading_values(snapshot.imu),
+            *self._imu_reading_values(snapshot.active_imu),
+        ])
+        self.rows_written_by_stream["imu"] += 1
+        self._flush()
+
+    @staticmethod
+    def _imu_reading_values(reading) -> list[object]:
+        if reading.frame_count <= 0:
+            return [""] * 14
+        return [
             reading.frame_count,
             reading.accel_x,
             reading.accel_y,
@@ -347,9 +369,7 @@ class RosSummaryRecordingSession:
             reading.roll_deg,
             reading.pitch_deg,
             reading.yaw_deg,
-        ])
-        self.rows_written_by_stream["imu"] += 1
-        self._flush()
+        ]
 
     def _flush(self) -> None:
         if self._odom_file is not None:

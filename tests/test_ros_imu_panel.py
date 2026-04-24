@@ -98,6 +98,48 @@ class RosImuPanelTests(unittest.TestCase):
         self.assertAlmostEqual(data["imu_yaw_deg"][-1], 7.0)
         self.assertAlmostEqual(data["active_imu_yaw_deg"][-1], 8.0)
 
+    def test_plot_defaults_to_smoothed_series_without_showing_raw_lines(self) -> None:
+        panel = RosImuPanel()
+        original_append = panel._buffer.append
+        timestamps = iter([100.0, 100.1, 100.2])
+
+        def append_with_timestamp(snapshot: RosSnapshot) -> float:
+            return original_append(snapshot, timestamp=next(timestamps))
+
+        panel._buffer.append = append_with_timestamp
+
+        for frame_count, value in enumerate((0.0, 10.0, 0.0), start=1):
+            panel.update_snapshot(
+                RosSnapshot(active_imu=RosImuReading(frame_count=frame_count, accel_z=value))
+            )
+
+        panel._flush_pending_snapshot()
+
+        _x, y = panel._curves["active_imu_accel_z"].getData()
+        self.assertAlmostEqual(float(y[-1]), 10.0 / 3.0, places=6)
+        self.assertFalse(panel._raw_curves["active_imu_accel_z"].isVisible())
+
+    def test_show_raw_data_toggle_displays_unsmoothed_overlay(self) -> None:
+        panel = RosImuPanel()
+        original_append = panel._buffer.append
+        timestamps = iter([100.0, 100.1, 100.2])
+
+        def append_with_timestamp(snapshot: RosSnapshot) -> float:
+            return original_append(snapshot, timestamp=next(timestamps))
+
+        panel._buffer.append = append_with_timestamp
+
+        for frame_count, value in enumerate((0.0, 10.0, 0.0), start=1):
+            panel.update_snapshot(
+                RosSnapshot(active_imu=RosImuReading(frame_count=frame_count, accel_z=value))
+            )
+        panel._show_raw_cb.setChecked(True)
+        panel._flush_pending_snapshot()
+
+        _x, raw_y = panel._raw_curves["active_imu_accel_z"].getData()
+        self.assertTrue(panel._raw_curves["active_imu_accel_z"].isVisible())
+        self.assertEqual(raw_y.tolist(), [0.0, 10.0, 0.0])
+
     def test_high_rate_updates_are_coalesced_before_plot_refresh(self) -> None:
         panel = RosImuPanel()
         refresh_count = 0

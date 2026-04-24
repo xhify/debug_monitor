@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+import numpy as np
 import pyqtgraph as pg
 
 from ros_bridge_worker import RosImuReading, RosSnapshot
@@ -26,6 +28,23 @@ ROS_IMU_DISPLAY_NAMES = {
     "imu": "IMU",
     "active_imu": "活动 IMU",
 }
+
+_PLOT_LAYOUT: tuple[tuple[str, str, str], ...] = (
+    ("Acc X", "m/s²", "accel_x"),
+    ("Acc Y", "m/s²", "accel_y"),
+    ("Acc Z", "m/s²", "accel_z"),
+    ("Gyro X", "rad/s", "gyro_x"),
+    ("Gyro Y", "rad/s", "gyro_y"),
+    ("Gyro Z", "rad/s", "gyro_z"),
+    ("Roll", "deg", "roll_deg"),
+    ("Pitch", "deg", "pitch_deg"),
+    ("Yaw", "deg", "yaw_deg"),
+)
+
+_DEVICE_STYLES: tuple[tuple[str, Qt.PenStyle, str], ...] = (
+    ("imu", Qt.SolidLine, "#2c3e50"),
+    ("active_imu", Qt.DashLine, "#e67e22"),
+)
 
 
 class RosImuPanel(QWidget):
@@ -43,6 +62,7 @@ class RosImuPanel(QWidget):
             "active_imu": {},
         }
         self._curves: dict[str, pg.PlotDataItem] = {}
+        self._raw_curves: dict[str, pg.PlotDataItem] = {}
         self._buffer = RosDualImuTimeSeriesBuffer()
         self._paused = False
         self._last_imu_frame_counts = (0, 0)
@@ -74,6 +94,21 @@ class RosImuPanel(QWidget):
         self._pause_cb = QCheckBox("暂停绘图")
         self._pause_cb.toggled.connect(self._on_pause_toggled)
         control_row.addWidget(self._pause_cb)
+
+        self._show_raw_cb = QCheckBox("显示原始数据")
+        self._show_raw_cb.toggled.connect(self._on_display_option_changed)
+        control_row.addWidget(self._show_raw_cb)
+
+        control_row.addWidget(QLabel("平滑:"))
+        self._smoothing_window_combo = QComboBox()
+        self._smoothing_window_combo.addItem("关", 0.0)
+        self._smoothing_window_combo.addItem("50 ms", 0.05)
+        self._smoothing_window_combo.addItem("100 ms", 0.1)
+        self._smoothing_window_combo.addItem("200 ms", 0.2)
+        self._smoothing_window_combo.addItem("500 ms", 0.5)
+        self._smoothing_window_combo.setCurrentIndex(3)
+        self._smoothing_window_combo.currentIndexChanged.connect(self._on_display_option_changed)
+        control_row.addWidget(self._smoothing_window_combo)
         control_row.addStretch()
         layout.addLayout(control_row)
 
@@ -109,63 +144,80 @@ class RosImuPanel(QWidget):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
 
-        splitter = QSplitter(Qt.Vertical)
-        self._acc_plot = self._make_plot("加速度", "m/s^2")
-        self._gyro_plot = self._make_plot("角速度", "rad/s")
-        self._euler_plot = self._make_plot("姿态角", "deg")
-        self._gyro_plot.setXLink(self._acc_plot)
-        self._euler_plot.setXLink(self._acc_plot)
+        layout.addWidget(self._build_legend_strip())
 
-        for device_key, style in (("imu", Qt.SolidLine), ("active_imu", Qt.DashLine)):
-            self._add_device_curves(device_key, style)
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(4)
 
-        splitter.addWidget(self._acc_plot)
-        splitter.addWidget(self._gyro_plot)
-        splitter.addWidget(self._euler_plot)
-        layout.addWidget(splitter, stretch=1)
+        self._plots: dict[str, pg.PlotWidget] = {}
+        for idx, (title, unit, data_key) in enumerate(_PLOT_LAYOUT):
+            row, col = divmod(idx, 3)
+            plot = self._make_small_plot(title, unit, show_x_label=(row == 2))
+            grid.addWidget(plot, row, col)
+            self._plots[data_key] = plot
+
+        for row in range(3):
+            grid.setRowStretch(row, 1)
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
+
+        self._acc_plot = self._plots["accel_x"]
+        for data_key, plot in self._plots.items():
+            if plot is not self._acc_plot:
+                plot.setXLink(self._acc_plot)
+
+        for data_key, plot in self._plots.items():
+            for device_key, style, color in _DEVICE_STYLES:
+                curve_key = f"{device_key}_{data_key}"
+                self._raw_curves[curve_key] = plot.plot(
+                    pen=pg.mkPen(color, width=0.7, style=style),
+                )
+                self._raw_curves[curve_key].setVisible(False)
+                self._curves[f"{device_key}_{data_key}"] = plot.plot(
+                    pen=pg.mkPen(color, width=1.8, style=style),
+                )
+
+        layout.addWidget(grid_host, stretch=1)
         return widget
 
-    def _make_plot(self, title: str, unit: str) -> pg.PlotWidget:
-        plot = pg.PlotWidget(title=title)
+    def _build_legend_strip(self) -> QWidget:
+        strip = QWidget()
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(4, 0, 4, 0)
+        row.setSpacing(16)
+        row.addStretch()
+        for device_key, _style, color in _DEVICE_STYLES:
+            marker = QLabel()
+            marker.setFixedSize(28, 2)
+            dashed = device_key == "active_imu"
+            border = "dashed" if dashed else "solid"
+            marker.setStyleSheet(
+                f"background-color: transparent; border-top: 2px {border} {color};"
+            )
+            row.addWidget(marker, alignment=Qt.AlignVCenter)
+            text = QLabel(ROS_IMU_DISPLAY_NAMES[device_key])
+            text.setStyleSheet(f"color: {color};")
+            row.addWidget(text)
+        row.addStretch()
+        return strip
+
+    def _make_small_plot(self, title: str, unit: str, show_x_label: bool) -> pg.PlotWidget:
+        plot = pg.PlotWidget()
         plot.setBackground("w")
-        plot.showGrid(x=True, y=True, alpha=0.3)
-        plot.setLabel("left", title, units=unit)
-        plot.setLabel("bottom", "时间", units="s")
-        plot.addLegend(offset=(10, 10))
+        plot.setTitle(
+            f"<span style='color:#2c3e50; font-size:9pt'>{title} ({unit})</span>"
+        )
+        plot.showGrid(x=True, y=True, alpha=0.25)
+        plot.getPlotItem().getAxis("left").setWidth(38)
+        if show_x_label:
+            plot.setLabel("bottom", "时间", units="s")
         plot.getPlotItem().setDownsampling(mode="peak")
         plot.getPlotItem().setClipToView(True)
         return plot
-
-    def _add_device_curves(self, device_key: str, style: Qt.PenStyle) -> None:
-        name = ROS_IMU_DISPLAY_NAMES[device_key]
-        palette = {
-            "x": "#c0392b" if device_key == "imu" else "#ff7043",
-            "y": "#2980b9" if device_key == "imu" else "#5dade2",
-            "z": "#27ae60" if device_key == "imu" else "#58d68d",
-        }
-        for axis in ("x", "y", "z"):
-            self._curves[f"{device_key}_accel_{axis}"] = self._acc_plot.plot(
-                pen=pg.mkPen(palette[axis], width=1.4, style=style),
-                name=f"{name} Acc {axis.upper()}",
-            )
-            self._curves[f"{device_key}_gyro_{axis}"] = self._gyro_plot.plot(
-                pen=pg.mkPen(palette[axis], width=1.4, style=style),
-                name=f"{name} Gyro {axis.upper()}",
-            )
-
-        self._curves[f"{device_key}_roll_deg"] = self._euler_plot.plot(
-            pen=pg.mkPen("#34495e" if device_key == "imu" else "#7f8c8d", width=1.4, style=style),
-            name=f"{name} Roll",
-        )
-        self._curves[f"{device_key}_pitch_deg"] = self._euler_plot.plot(
-            pen=pg.mkPen("#e67e22" if device_key == "imu" else "#f5b041", width=1.4, style=style),
-            name=f"{name} Pitch",
-        )
-        self._curves[f"{device_key}_yaw_deg"] = self._euler_plot.plot(
-            pen=pg.mkPen("#2c7fb8" if device_key == "imu" else "#85c1e9", width=1.4, style=style),
-            name=f"{name} Yaw",
-        )
 
     def _build_value_widget(self) -> QGroupBox:
         group = QGroupBox("ROS IMU 当前数据")
@@ -256,12 +308,31 @@ class RosImuPanel(QWidget):
     def _refresh_plot(self) -> None:
         time_arr, data = self._buffer.snapshot()
         if len(time_arr) == 0:
-            for curve in self._curves.values():
+            for curve in [*self._curves.values(), *self._raw_curves.values()]:
                 curve.setData([], [])
             return
+        smoothing_window_s = float(self._smoothing_window_combo.currentData() or 0.0)
+        show_raw = self._show_raw_cb.isChecked()
         for key, curve in self._curves.items():
-            curve.setData(time_arr, data[key])
+            raw_values = data[key]
+            curve.setData(time_arr, self._smooth_series(time_arr, raw_values, smoothing_window_s))
+            raw_curve = self._raw_curves[key]
+            raw_curve.setData(time_arr, raw_values)
+            raw_curve.setVisible(show_raw)
         self._follow_latest_time(time_arr)
+
+    @staticmethod
+    def _smooth_series(time_arr: np.ndarray, values: np.ndarray, window_s: float) -> np.ndarray:
+        if window_s <= 0.0 or values.size < 2:
+            return values
+
+        smoothed = np.empty_like(values, dtype=np.float64)
+        cumulative = np.concatenate(([0.0], np.cumsum(values, dtype=np.float64)))
+        start_indices = np.searchsorted(time_arr, time_arr - window_s - 1e-12, side="left")
+        end_indices = np.arange(1, values.size + 1)
+        counts = end_indices - start_indices
+        smoothed[:] = (cumulative[end_indices] - cumulative[start_indices]) / counts
+        return smoothed
 
     def _follow_latest_time(self, time_arr) -> None:
         latest_time = float(time_arr[-1])
@@ -283,3 +354,9 @@ class RosImuPanel(QWidget):
 
     def _on_pause_toggled(self, checked: bool) -> None:
         self._paused = checked
+
+    def _on_display_option_changed(self) -> None:
+        self._plot_dirty = True
+        if not self._paused:
+            self._refresh_plot()
+            self._plot_dirty = False

@@ -14,12 +14,22 @@ class FakeRos:
         self.port = port
         self.run_called = False
         self.terminated = False
+        self.closed = False
 
     def run(self) -> None:
         self.run_called = True
 
+    def close(self) -> None:
+        self.closed = True
+
     def terminate(self) -> None:
         self.terminated = True
+
+
+class FakeRosMissingThreadOnTerminate(FakeRos):
+    def terminate(self) -> None:
+        self.terminated = True
+        raise AttributeError("'TwistedEventLoopManager' object has no attribute '_thread'")
 
 
 class FakeTopic:
@@ -194,7 +204,7 @@ class RosBridgeSessionTests(unittest.TestCase):
             },
         )
 
-    def test_disconnect_unsubscribes_topics_and_terminates_ros(self) -> None:
+    def test_disconnect_unsubscribes_topics_and_closes_ros_without_terminating_reactor(self) -> None:
         session = RosBridgeSession(
             host="192.168.0.14",
             port=9090,
@@ -206,8 +216,44 @@ class RosBridgeSessionTests(unittest.TestCase):
         session.disconnect()
 
         self.assertFalse(session.connected)
-        self.assertTrue(session.ros.terminated)
+        self.assertTrue(session.ros.closed)
+        self.assertFalse(session.ros.terminated)
         self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:4]))
+
+    def test_disconnect_tolerates_roslibpy_missing_thread_terminate_bug(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRosMissingThreadOnTerminate,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.disconnect()
+
+        self.assertFalse(session.connected)
+        self.assertTrue(session.ros.closed)
+        self.assertFalse(session.ros.terminated)
+        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:4]))
+
+    def test_session_can_connect_again_after_disconnect_without_restarting_reactor(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+        first_ros = session.ros
+
+        session.disconnect()
+        session.connect()
+
+        self.assertTrue(session.connected)
+        self.assertTrue(first_ros.closed)
+        self.assertFalse(first_ros.terminated)
+        self.assertIsNot(session.ros, first_ros)
+        self.assertTrue(session.ros.run_called)
 
 
 if __name__ == "__main__":

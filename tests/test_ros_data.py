@@ -80,6 +80,7 @@ class RosCsvRecordingSessionTests(unittest.TestCase):
             with final_path.open("r", encoding="utf-8", newline="") as fh:
                 rows = list(csv.reader(fh))
             self.assertEqual(rows[0], ROS_CSV_HEADER)
+            self.assertEqual(rows[0][2:4], ["motor_a_left_speed", "motor_b_right_speed"])
             self.assertEqual(rows[1][0], "0.250")
             self.assertEqual(rows[1][1], "4")
             self.assertEqual(rows[1][2], "0.4")
@@ -162,20 +163,24 @@ class RosSummaryRecordingSessionTests(unittest.TestCase):
                 imu_rows = list(csv.reader(fh))
 
             self.assertEqual(odom_rows[0], ROS_SUMMARY_ODOM_HEADER)
+            self.assertEqual(odom_rows[0][2:4], ["motor_a_left_speed", "motor_b_right_speed"])
             self.assertEqual(odom_rows[1][1], "3")
             self.assertEqual(odom_rows[1][2], "0.42")
             self.assertEqual(odom_rows[1][5], "1.0")
             self.assertEqual(imu_rows[0], ROS_SUMMARY_IMU_HEADER)
-            self.assertEqual(imu_rows[1][1], "/imu")
-            self.assertEqual(imu_rows[1][2], "1")
-            self.assertEqual(imu_rows[1][5], "9.7")
-            self.assertEqual(imu_rows[1][-1], "90.0")
-            self.assertEqual(imu_rows[2][1], "/active_imu")
-            self.assertEqual(imu_rows[2][5], "-9.8")
+            self.assertEqual(imu_rows[0][1:4], ["imu_frame_count", "imu_accel_x", "imu_accel_y"])
+            active_start = imu_rows[0].index("active_imu_frame_count")
+            self.assertEqual(imu_rows[1][1], "1")
+            self.assertEqual(imu_rows[1][4], "9.7")
+            self.assertEqual(imu_rows[1][14], "90.0")
+            self.assertEqual(imu_rows[1][active_start], "")
+            self.assertEqual(imu_rows[2][1], "")
+            self.assertEqual(imu_rows[2][active_start], "1")
+            self.assertEqual(imu_rows[2][active_start + 3], "-9.8")
             self.assertEqual(imu_rows[2][-2], "90.0")
             self.assertEqual(session.rows_written_by_stream, {"odom": 1, "imu": 2})
 
-    def test_ros_imu_summary_does_not_synthesize_missing_active_imu_rows(self) -> None:
+    def test_ros_imu_summary_leaves_missing_side_blank_in_wide_rows(self) -> None:
         with temp_dir() as tmp:
             session = RosSummaryRecordingSession()
             session.start_in_directory(tmp, started_at="20260423_101501")
@@ -192,7 +197,10 @@ class RosSummaryRecordingSessionTests(unittest.TestCase):
             with (tmp / "ros_imu.csv").open("r", encoding="utf-8", newline="") as fh:
                 imu_rows = list(csv.reader(fh))
 
-            self.assertEqual([row[1] for row in imu_rows[1:]], ["/imu"])
+            active_start = imu_rows[0].index("active_imu_frame_count")
+            self.assertEqual(imu_rows[1][1], "1")
+            self.assertEqual(imu_rows[1][4], "9.8")
+            self.assertTrue(all(value == "" for value in imu_rows[1][active_start:]))
             self.assertEqual(session.rows_written_by_stream, {"odom": 0, "imu": 1})
 
 

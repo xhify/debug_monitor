@@ -86,21 +86,75 @@ class RosPanelTests(unittest.TestCase):
         panel._flush_pending_snapshot()
 
         self.assertEqual(panel._labels["frame_count"].text(), "12")
+        self.assertEqual(panel._field_labels["linear_x"].text(), "电机A左轮速度")
+        self.assertEqual(panel._field_labels["linear_y"].text(), "电机B右轮速度")
         self.assertEqual(panel._labels["linear_x"].text(), "0.3000")
+        self.assertEqual(panel._labels["linear_y"].text(), "0.1000")
         self.assertEqual(panel._labels["angular_z"].text(), "-0.2000")
         self.assertEqual(panel._labels["pose_x"].text(), "1.2000")
         self.assertEqual(panel._labels["accel_z"].text(), "9.8100")
         self.assertEqual(panel._labels["gyro_z"].text(), "0.0400")
         self.assertEqual(panel._labels["voltage"].text(), "25.80")
+        self.assertEqual(panel._speed_labels["actual_left"].text(), "0.3000")
+        self.assertEqual(panel._speed_labels["actual_right"].text(), "0.1000")
 
-    def test_ros_panel_omits_curve_plot_and_keeps_control_groups(self) -> None:
+    def test_speed_monitor_tracks_last_commanded_targets(self) -> None:
+        panel = RosPanel()
+        panel.set_connected(True)
+        panel._linear_x_spin.setValue(0.25)
+
+        panel._send_cmd_vel_btn.click()
+
+        self.assertEqual(panel._speed_labels["target_left"].text(), "0.2500")
+        self.assertEqual(panel._speed_labels["target_right"].text(), "0.2500")
+
+        panel._pid_linear_x_spin.setValue(0.2)
+        panel._pid_backward_btn.click()
+
+        self.assertEqual(panel._speed_labels["target_left"].text(), "-0.2000")
+        self.assertEqual(panel._speed_labels["target_right"].text(), "-0.2000")
+
+        panel._pid_stop_btn.click()
+
+        self.assertEqual(panel._speed_labels["target_left"].text(), "0.0000")
+        self.assertEqual(panel._speed_labels["target_right"].text(), "0.0000")
+
+    def test_ros_panel_adds_speed_plot_and_keeps_control_groups(self) -> None:
         panel = RosPanel()
 
-        self.assertFalse(hasattr(panel, "_plot_widget"))
-        self.assertFalse(hasattr(panel, "_curves"))
+        self.assertTrue(hasattr(panel, "_speed_plot"))
+        self.assertIn("actual_left", panel._speed_curves)
+        self.assertIn("target_right", panel._speed_curves)
         self.assertEqual(panel._data_group.title(), "ROS 数据")
         self.assertEqual(panel._cmd_group.title(), "/cmd_vel")
         self.assertEqual(panel._pid_group.title(), "PID 直行控制 /line_follow_control")
+
+    def test_speed_plot_tracks_actual_and_target_history(self) -> None:
+        panel = RosPanel()
+        original_append = panel._buffer.append
+        timestamps = iter([10.0, 10.1])
+
+        def append_with_timestamp(snapshot: RosSnapshot) -> float:
+            return original_append(snapshot, timestamp=next(timestamps))
+
+        panel._buffer.append = append_with_timestamp
+        panel.set_connected(True)
+        panel._linear_x_spin.setValue(0.25)
+
+        panel._send_cmd_vel_btn.click()
+        panel.update_snapshot(RosSnapshot(frame_count=1, linear_x=0.10, linear_y=0.12))
+        panel.update_snapshot(RosSnapshot(frame_count=2, linear_x=0.20, linear_y=0.22))
+        panel._flush_pending_snapshot()
+
+        _x, actual_left = panel._speed_curves["actual_left"].getData()
+        _x, actual_right = panel._speed_curves["actual_right"].getData()
+        _x, target_left = panel._speed_curves["target_left"].getData()
+        _x, target_right = panel._speed_curves["target_right"].getData()
+
+        self.assertEqual(actual_left.tolist(), [0.10, 0.20])
+        self.assertEqual(actual_right.tolist(), [0.12, 0.22])
+        self.assertEqual(target_left.tolist(), [0.25, 0.25])
+        self.assertEqual(target_right.tolist(), [0.25, 0.25])
 
     def test_high_rate_updates_are_coalesced_before_value_refresh(self) -> None:
         panel = RosPanel()

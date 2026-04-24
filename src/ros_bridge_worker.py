@@ -142,7 +142,7 @@ class RosBridgeSession:
             if topic is not None:
                 topic.unsubscribe()
         if self.ros is not None:
-            self.ros.terminate()
+            self.ros.close()
         self.connected = False
 
     def publish_cmd_vel(self, linear_x: float, angular_z: float) -> None:
@@ -318,8 +318,6 @@ class RosBridgeWorker(QThread):
 
     def close_bridge(self) -> None:
         self._running = False
-        if self._session is not None:
-            self._session.disconnect()
         self.wait(2000)
         self.connection_changed.emit(False)
 
