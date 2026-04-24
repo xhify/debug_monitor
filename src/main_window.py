@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -35,7 +36,10 @@ from PySide6.QtWidgets import (
 from analytics import compute_channel_metrics
 from data_buffer import COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B, DataBuffer
 from recording_session import RecordingSession
+from radar_scpi import RadarScpiClient
 from replay_data import ReplayData
+from ros_bridge_worker import RosBridgeWorker
+from ros_data import RosSummaryRecordingSession
 from serial_worker import SerialWorker
 from widgets.analysis_panel import AnalysisPanel
 from widgets.command_panel import CommandPanel
@@ -43,6 +47,8 @@ from widgets.data_panel import DataPanel
 from widgets.imu_panel import ImuPanel
 from widgets.param_panel import ParamPanel
 from widgets.plot_panel import PlotPanel
+from widgets.ros_imu_panel import RosImuPanel
+from widgets.ros_panel import RosPanel
 from widgets.serial_panel import SerialPanel
 
 
@@ -62,6 +68,10 @@ class MainWindow(QMainWindow):
         self._worker.param_received.connect(self._on_param)
         self._worker.error_occurred.connect(self._on_error)
         self._worker.connection_changed.connect(self._on_connection_changed)
+        self._ros_worker = RosBridgeWorker()
+        self._ros_worker.snapshot_received.connect(self._on_ros_snapshot)
+        self._ros_worker.error_occurred.connect(self._on_error)
+        self._ros_worker.connection_changed.connect(self._on_ros_connection_changed)
 
         self._data_mode = "live"
         self._replay_data: ReplayData | None = None
@@ -71,7 +81,13 @@ class MainWindow(QMainWindow):
         self._summary_rows: dict[str, dict[str, object]] = {}
         self._summary_last_counts: dict[str, tuple[float, int]] = {}
         self._summary_encoder_session: RecordingSession | None = None
+        self._summary_ros_session: RosSummaryRecordingSession | None = None
         self._summary_session_dir: Path | None = None
+        self._summary_radar_recording = False
+        self._summary_radar_filename = ""
+        self._latest_ros_snapshot = None
+        self._ros_connected = False
+        self._radar_client = RadarScpiClient()
 
         self._setup_ui()
         self._setup_timers()
@@ -198,10 +214,20 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(mid_splitter, stretch=1)
 
         self._imu_panel = ImuPanel()
+        self._ros_panel = RosPanel()
+        self._ros_imu_panel = RosImuPanel()
+        self._ros_panel.connect_requested.connect(self._ros_worker.open_bridge)
+        self._ros_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
+        self._ros_panel.cmd_vel_requested.connect(self._ros_worker.publish_cmd_vel)
+        self._ros_panel.pid_control_requested.connect(self._ros_worker.publish_line_follow_control)
+        self._ros_imu_panel.connect_requested.connect(self._ros_worker.open_bridge)
+        self._ros_imu_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
         self._summary_page = self._build_summary_page()
         self._module_stack.addWidget(self._summary_page)
         self._module_stack.addWidget(self._encoder_page)
         self._module_stack.addWidget(self._imu_panel)
+        self._module_stack.addWidget(self._ros_panel)
+        self._module_stack.addWidget(self._ros_imu_panel)
         self._module_stack.setCurrentWidget(self._encoder_page)
 
         self._status_label = QLabel("就绪")
@@ -241,6 +267,18 @@ class MainWindow(QMainWindow):
         self._module_button_group.addButton(self._imu_module_btn)
         switch_row.addWidget(self._imu_module_btn)
 
+        self._ros_module_btn = QPushButton("ROS")
+        self._ros_module_btn.setCheckable(True)
+        self._ros_module_btn.clicked.connect(lambda: self._switch_module("ros"))
+        self._module_button_group.addButton(self._ros_module_btn)
+        switch_row.addWidget(self._ros_module_btn)
+
+        self._ros_imu_module_btn = QPushButton("ROS IMU")
+        self._ros_imu_module_btn.setCheckable(True)
+        self._ros_imu_module_btn.clicked.connect(lambda: self._switch_module("ros_imu"))
+        self._module_button_group.addButton(self._ros_imu_module_btn)
+        switch_row.addWidget(self._ros_imu_module_btn)
+
         switch_row.addStretch()
         root_layout.addLayout(switch_row)
 
@@ -252,6 +290,14 @@ class MainWindow(QMainWindow):
         if module == "imu":
             self._module_stack.setCurrentWidget(self._imu_panel)
             self._status_label.setText("IMU 模块")
+            return
+        if module == "ros":
+            self._module_stack.setCurrentWidget(self._ros_panel)
+            self._status_label.setText("ROS 模块")
+            return
+        if module == "ros_imu":
+            self._module_stack.setCurrentWidget(self._ros_imu_panel)
+            self._status_label.setText("ROS IMU 模块")
             return
         self._module_stack.setCurrentWidget(self._encoder_page)
         self._status_label.setText("编码器模块")
@@ -276,6 +322,19 @@ class MainWindow(QMainWindow):
         note_row.addWidget(self._summary_note_edit, stretch=1)
         record_layout.addLayout(note_row)
 
+        radar_row = QHBoxLayout()
+        self._summary_radar_test_btn = QPushButton("测试雷达连接")
+        self._summary_radar_test_btn.clicked.connect(self._test_summary_radar_connection)
+        radar_row.addWidget(self._summary_radar_test_btn)
+
+        self._summary_radar_sync_cb = QCheckBox("同步雷达录制")
+        self._summary_radar_sync_cb.setEnabled(False)
+        radar_row.addWidget(self._summary_radar_sync_cb)
+
+        self._summary_radar_status_label = QLabel("雷达未测试")
+        radar_row.addWidget(self._summary_radar_status_label, stretch=1)
+        record_layout.addLayout(radar_row)
+
         button_row = QHBoxLayout()
         self._summary_record_btn = QPushButton("全部开始记录")
         self._summary_record_btn.clicked.connect(self._toggle_summary_recording)
@@ -294,10 +353,19 @@ class MainWindow(QMainWindow):
         group = QGroupBox(title)
         grid = QGridLayout(group)
 
+        source_combo = QComboBox()
+        source_combo.addItem("串口", "serial")
+        if key == "encoder":
+            source_combo.addItem("ROS /odom", "ros_odom")
+        else:
+            source_combo.addItem("ROS IMU", "ros_imu")
+        source_combo.currentIndexChanged.connect(lambda: self._on_summary_source_changed(key))
+
         port_combo = QComboBox()
         port_combo.setEditable(True)
-        port_combo.setMinimumWidth(180)
+        port_combo.setMinimumWidth(120)
         baud_combo = QComboBox()
+        baud_combo.setMinimumWidth(80)
         for baud in bauds:
             baud_combo.addItem(str(baud), baud)
 
@@ -314,13 +382,15 @@ class MainWindow(QMainWindow):
         error_label = QLabel("0")
         hz_label = QLabel("---")
 
-        grid.addWidget(QLabel("端口"), 0, 0)
-        grid.addWidget(port_combo, 0, 1)
-        grid.addWidget(QLabel("波特率"), 0, 2)
-        grid.addWidget(baud_combo, 0, 3)
-        grid.addWidget(refresh_btn, 0, 4)
-        grid.addWidget(connect_btn, 0, 5)
-        grid.addWidget(disconnect_btn, 0, 6)
+        grid.addWidget(QLabel("来源"), 0, 0)
+        grid.addWidget(source_combo, 0, 1)
+        grid.addWidget(QLabel("端口"), 0, 2)
+        grid.addWidget(port_combo, 0, 3)
+        grid.addWidget(QLabel("波特率"), 0, 4)
+        grid.addWidget(baud_combo, 0, 5)
+        grid.addWidget(refresh_btn, 0, 6)
+        grid.addWidget(connect_btn, 0, 7)
+        grid.addWidget(disconnect_btn, 0, 8)
         grid.addWidget(QLabel("状态"), 1, 0)
         grid.addWidget(status_label, 1, 1)
         grid.addWidget(QLabel("帧数"), 1, 2)
@@ -331,6 +401,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(hz_label, 1, 7)
 
         self._summary_rows[key] = {
+            "source_combo": source_combo,
             "port_combo": port_combo,
             "baud_combo": baud_combo,
             "refresh_btn": refresh_btn,
@@ -341,6 +412,7 @@ class MainWindow(QMainWindow):
             "error_label": error_label,
             "hz_label": hz_label,
         }
+        self._on_summary_source_changed(key)
         return group
 
     def _refresh_summary_ports(self, key: str) -> None:
@@ -366,7 +438,25 @@ class MainWindow(QMainWindow):
         combo: QComboBox = self._summary_rows[key]["baud_combo"]
         return int(combo.currentData())
 
+    def _summary_source(self, key: str) -> str:
+        combo: QComboBox = self._summary_rows[key]["source_combo"]
+        return str(combo.currentData() or "serial")
+
+    def _on_summary_source_changed(self, key: str) -> None:
+        row = self._summary_rows[key]
+        serial_source = self._summary_source(key) == "serial"
+        row["port_combo"].setEnabled(serial_source)
+        row["baud_combo"].setEnabled(serial_source)
+        row["refresh_btn"].setEnabled(serial_source)
+        if serial_source:
+            row["status_label"].setText("未连接")
+        else:
+            row["status_label"].setText("使用 ROS")
+
     def _connect_summary_device(self, key: str) -> None:
+        if self._summary_source(key) != "serial":
+            self._ros_worker.open_bridge(self._ros_panel._host_edit.text().strip(), self._ros_panel._port_spin.value())
+            return
         port = self._summary_port(key)
         if not port:
             self._summary_rows[key]["status_label"].setText("请选择串口")
@@ -385,6 +475,9 @@ class MainWindow(QMainWindow):
         self._imu_panel._on_connect(device_key)
 
     def _disconnect_summary_device(self, key: str) -> None:
+        if self._summary_source(key) != "serial":
+            self._ros_worker.close_bridge()
+            return
         if key == "encoder":
             self._on_disconnect()
             return
@@ -402,10 +495,33 @@ class MainWindow(QMainWindow):
             combo.setEditText(value)
 
     def _toggle_summary_recording(self) -> None:
-        if self._summary_encoder_session is None:
-            self._start_summary_recording()
+        if not self._is_summary_recording():
+            try:
+                self._start_summary_recording()
+            except Exception as exc:
+                self._summary_record_status_label.setText(f"启动失败: {exc}")
+                self._status_label.setText(f"同步记录启动失败: {exc}")
             return
         self._stop_summary_recording(save=True)
+
+    def _is_summary_recording(self) -> bool:
+        return self._summary_session_dir is not None
+
+    def _test_summary_radar_connection(self) -> None:
+        try:
+            response = self._radar_client.identify()
+        except Exception as exc:
+            self._summary_radar_sync_cb.setChecked(False)
+            self._summary_radar_sync_cb.setEnabled(False)
+            self._summary_radar_status_label.setText(f"雷达连接失败: {exc}")
+            self._status_label.setText(f"雷达连接失败: {exc}")
+            return
+        self._summary_radar_sync_cb.setEnabled(True)
+        self._summary_radar_status_label.setText(f"雷达已连接: {response}")
+        self._status_label.setText("雷达连接测试通过")
+
+    def _summary_should_record_radar(self) -> bool:
+        return self._summary_radar_sync_cb.isEnabled() and self._summary_radar_sync_cb.isChecked()
 
     def _start_summary_recording(
         self,
@@ -418,22 +534,44 @@ class MainWindow(QMainWindow):
             base_dir = Path.cwd() / "recordings"
         session_dir = self._create_summary_session_dir(Path(base_dir), timestamp)
 
-        encoder_session = RecordingSession(base_dir=session_dir)
-        encoder_session.start()
-        self._buffer.start_recording(encoder_session)
-        self._summary_encoder_session = encoder_session
-        self._summary_session_dir = session_dir
+        try:
+            if self._summary_should_record_radar():
+                self._summary_radar_filename = self._radar_client.start_recording(timestamp)
+                self._summary_radar_recording = True
+                self._summary_radar_status_label.setText(f"雷达记录中: {self._summary_radar_filename}")
+        except Exception:
+            session_dir.rmdir()
+            raise
 
-        note = self._summary_note_edit.toPlainText().strip()
-        self._imu_panel.start_recording_in_directory(session_dir, started_at=timestamp, note=note)
-        self._write_summary_metadata(session_dir=session_dir, started_at=timestamp, note=note)
+        try:
+            self._summary_session_dir = session_dir
+            if self._summary_source("encoder") == "serial":
+                encoder_session = RecordingSession(base_dir=session_dir)
+                encoder_session.start()
+                self._buffer.start_recording(encoder_session)
+                self._summary_encoder_session = encoder_session
+
+            if self._summary_uses_ros():
+                ros_session = RosSummaryRecordingSession()
+                ros_session.start_in_directory(session_dir, started_at=timestamp)
+                self._summary_ros_session = ros_session
+
+            note = self._summary_note_edit.toPlainText().strip()
+            if self._summary_uses_serial_imu():
+                self._imu_panel.start_recording_in_directory(session_dir, started_at=timestamp, note=note)
+            self._write_summary_metadata(session_dir=session_dir, started_at=timestamp, note=note)
+        except Exception:
+            self._stop_summary_recording(save=False)
+            if session_dir.exists():
+                session_dir.rmdir()
+            raise
 
         self._record_btn.setText("停止记录")
         self._record_btn.setStyleSheet("background-color: #e74c3c; color: white;")
         self._summary_record_btn.setText("全部停止记录")
         self._summary_record_btn.setStyleSheet("background-color: #e74c3c; color: white;")
         self._summary_record_status_label.setText(f"记录中: {session_dir}")
-        self._status_label.setText("正在同步记录编码器和 IMU...")
+        self._status_label.setText("正在同步记录汇总数据...")
         return session_dir
 
     def _create_summary_session_dir(self, base_dir: Path, timestamp: str) -> Path:
@@ -453,40 +591,86 @@ class MainWindow(QMainWindow):
             "started_at": started_at,
             "note": note,
             "devices": {
-                "encoder": {
-                    "port": self._summary_port("encoder"),
-                    "baudrate": self._summary_baudrate("encoder"),
-                },
-                "imu_A": {
-                    "port": self._summary_port("imu_A"),
-                    "baudrate": self._summary_baudrate("imu_A"),
-                },
-                "imu_B": {
-                    "port": self._summary_port("imu_B"),
-                    "baudrate": self._summary_baudrate("imu_B"),
-                },
+                "encoder": self._summary_device_metadata("encoder"),
+                "imu_A": self._summary_device_metadata("imu_A"),
+                "imu_B": self._summary_device_metadata("imu_B"),
+                "radar": self._summary_radar_metadata(),
             },
-            "files": {
-                "encoder": "encoder.csv",
-                "imu_A": "imu_A.csv",
-                "imu_B": "imu_B.csv",
-                "imu_metadata": "imu_session.json",
-                "imu_aligned": "imu_merged_aligned.csv",
-            },
+            "files": self._summary_files_metadata(),
         }
         with (session_dir / "session.json").open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
+    def _summary_uses_ros(self) -> bool:
+        return self._summary_source("encoder") == "ros_odom" or any(
+            self._summary_source(key) == "ros_imu" for key in ("imu_A", "imu_B")
+        )
+
+    def _summary_uses_serial_imu(self) -> bool:
+        return any(self._summary_source(key) == "serial" for key in ("imu_A", "imu_B"))
+
+    def _summary_device_metadata(self, key: str) -> dict[str, object]:
+        source = self._summary_source(key)
+        metadata: dict[str, object] = {"source": source}
+        if source == "serial":
+            metadata["port"] = self._summary_port(key)
+            metadata["baudrate"] = self._summary_baudrate(key)
+            return metadata
+        metadata["topic"] = "/odom" if source == "ros_odom" else self._summary_imu_topic(key)
+        return metadata
+
+    def _summary_radar_metadata(self) -> dict[str, object]:
+        return {
+            "enabled": self._summary_should_record_radar(),
+            "host": getattr(self._radar_client, "host", "127.0.0.1"),
+            "port": getattr(self._radar_client, "port", 5026),
+            "filename": self._summary_radar_filename,
+        }
+
+    def _summary_files_metadata(self) -> dict[str, str]:
+        files: dict[str, str] = {}
+        if self._summary_source("encoder") == "serial":
+            files["encoder"] = "encoder.csv"
+        else:
+            files["ros_odom"] = "ros_odom.csv"
+        if self._summary_uses_serial_imu():
+            files.update({
+                "imu_A": "imu_A.csv",
+                "imu_B": "imu_B.csv",
+                "imu_metadata": "imu_session.json",
+                "imu_aligned": "imu_merged_aligned.csv",
+            })
+        if any(self._summary_source(key) == "ros_imu" for key in ("imu_A", "imu_B")):
+            files["ros_imu"] = "ros_imu.csv"
+        return files
+
+    @staticmethod
+    def _summary_imu_topic(key: str) -> str:
+        return "/imu" if key == "imu_A" else "/active_imu"
+
     def _stop_summary_recording(self, save: bool) -> Path | None:
         encoder_session = self._summary_encoder_session
+        ros_session = self._summary_ros_session
         session_dir = self._summary_session_dir
+        radar_was_recording = self._summary_radar_recording
         self._summary_encoder_session = None
+        self._summary_ros_session = None
         self._summary_session_dir = None
+        self._summary_radar_recording = False
 
         self._record_btn.setText("开始记录")
         self._record_btn.setStyleSheet("")
         self._summary_record_btn.setText("全部开始记录")
         self._summary_record_btn.setStyleSheet("")
+
+        radar_stop_error = ""
+        if radar_was_recording:
+            try:
+                self._radar_client.stop_recording()
+                self._summary_radar_status_label.setText("雷达记录已停止")
+            except Exception as exc:
+                radar_stop_error = f"雷达停止失败: {exc}"
+                self._summary_radar_status_label.setText(radar_stop_error)
 
         stopped_encoder_session = self._buffer.stop_recording()
         if encoder_session is None:
@@ -495,16 +679,28 @@ class MainWindow(QMainWindow):
         if save and session_dir is not None:
             if encoder_session is not None:
                 encoder_session.finalize(session_dir / "encoder.csv")
-            self._imu_panel.stop_recording(save=True)
+            if self._imu_panel.is_recording():
+                self._imu_panel.stop_recording(save=True)
+            if ros_session is not None:
+                ros_session.finalize()
             self._summary_record_status_label.setText(f"已保存: {session_dir}")
-            self._status_label.setText(f"同步记录已保存: {session_dir}")
+            if radar_stop_error:
+                self._status_label.setText(f"同步记录已保存，但{radar_stop_error}")
+            else:
+                self._status_label.setText(f"同步记录已保存: {session_dir}")
             return session_dir
 
         if encoder_session is not None:
             encoder_session.cancel()
-        self._imu_panel.stop_recording(save=False)
+        if self._imu_panel.is_recording():
+            self._imu_panel.stop_recording(save=False)
+        if ros_session is not None:
+            ros_session.cancel()
         self._summary_record_status_label.setText("同步记录已取消")
-        self._status_label.setText("同步记录已取消")
+        if radar_stop_error:
+            self._status_label.setText(f"同步记录已取消，但{radar_stop_error}")
+        else:
+            self._status_label.setText("同步记录已取消")
         return None
 
     def _setup_timers(self) -> None:
@@ -525,7 +721,7 @@ class MainWindow(QMainWindow):
         self._worker.open_port(port, baudrate)
 
     def _on_disconnect(self) -> None:
-        if self._summary_encoder_session is not None:
+        if self._is_summary_recording():
             self._stop_summary_recording(save=False)
         elif self._buffer.recording:
             self._stop_recording_session(save=False)
@@ -542,6 +738,22 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, msg: str) -> None:
         self._status_label.setText(f"错误: {msg}")
+
+    def _on_ros_connection_changed(self, connected: bool) -> None:
+        self._ros_connected = connected
+        self._ros_panel.set_connected(connected)
+        self._ros_imu_panel.set_connected(connected)
+        self._status_label.setText("ROS 已连接" if connected else "ROS 已断开")
+
+    def _on_ros_snapshot(self, snapshot) -> None:
+        self._latest_ros_snapshot = snapshot
+        if self._summary_ros_session is not None:
+            self._summary_ros_session.write_snapshot(snapshot)
+        current_page = self._module_stack.currentWidget()
+        if current_page is self._ros_panel or self._ros_panel.is_recording():
+            self._ros_panel.update_snapshot(snapshot)
+        if current_page is self._ros_imu_panel:
+            self._ros_imu_panel.update_snapshot(snapshot)
 
     def _on_refresh(self) -> None:
         time_arr, data, frame, title, footer = self._current_source_payload()
@@ -606,26 +818,38 @@ class MainWindow(QMainWindow):
         self._update_summary_status()
 
     def _update_summary_status(self) -> None:
-        self._update_summary_row(
-            key="encoder",
-            connected=self._serial_connected(self._worker),
-            frame_count=self._buffer.frame_index,
-            error_count=self._worker.error_count,
-        )
-        for summary_key, device_key in (("imu_A", "A"), ("imu_B", "B")):
-            device = self._imu_panel._devices[device_key]
+        if self._summary_source("encoder") == "serial":
             self._update_summary_row(
-                key=summary_key,
-                connected=self._serial_connected(device.worker),
-                frame_count=device.buffer.frame_index,
-                error_count=device.worker.error_count,
+                key="encoder",
+                connected=self._serial_connected(self._worker),
+                frame_count=self._buffer.frame_index,
+                error_count=self._worker.error_count,
             )
-        if self._summary_encoder_session is not None:
-            imu_rows = self._imu_panel.recording_rows_text()
-            encoder_rows = self._buffer.csv_rows_written
-            self._summary_record_status_label.setText(
-                f"记录中: 编码器 {encoder_rows} 行, IMU {imu_rows}"
+        else:
+            self._update_summary_row(
+                key="encoder",
+                connected=self._ros_connected,
+                frame_count=0 if self._latest_ros_snapshot is None else self._latest_ros_snapshot.frame_count,
+                error_count=self._ros_worker.error_count,
             )
+        for summary_key, device_key in (("imu_A", "A"), ("imu_B", "B")):
+            if self._summary_source(summary_key) == "serial":
+                device = self._imu_panel._devices[device_key]
+                self._update_summary_row(
+                    key=summary_key,
+                    connected=self._serial_connected(device.worker),
+                    frame_count=device.buffer.frame_index,
+                    error_count=device.worker.error_count,
+                )
+            else:
+                self._update_summary_row(
+                    key=summary_key,
+                    connected=self._ros_connected,
+                    frame_count=self._ros_imu_frame_count(summary_key),
+                    error_count=self._ros_worker.error_count,
+                )
+        if self._is_summary_recording():
+            self._summary_record_status_label.setText(self._summary_recording_status_text())
 
     def _update_summary_row(self, key: str, connected: bool, frame_count: int, error_count: int) -> None:
         row = self._summary_rows[key]
@@ -636,9 +860,10 @@ class MainWindow(QMainWindow):
         row["hz_label"].setText(self._summary_hz_text(key, frame_count))
         row["connect_btn"].setEnabled(not connected)
         row["disconnect_btn"].setEnabled(connected)
-        row["port_combo"].setEnabled(not connected)
-        row["baud_combo"].setEnabled(not connected)
-        row["refresh_btn"].setEnabled(not connected)
+        serial_source = self._summary_source(key) == "serial"
+        row["port_combo"].setEnabled(serial_source and not connected)
+        row["baud_combo"].setEnabled(serial_source and not connected)
+        row["refresh_btn"].setEnabled(serial_source and not connected)
 
     def _summary_hz_text(self, key: str, frame_count: int) -> str:
         now = perf_counter()
@@ -657,6 +882,24 @@ class MainWindow(QMainWindow):
     def _serial_connected(worker) -> bool:
         serial_port = getattr(worker, "_serial", None)
         return bool(serial_port is not None and serial_port.is_open)
+
+    def _ros_imu_frame_count(self, key: str) -> int:
+        if self._latest_ros_snapshot is None:
+            return 0
+        reading = self._latest_ros_snapshot.imu if key == "imu_A" else self._latest_ros_snapshot.active_imu
+        return reading.frame_count
+
+    def _summary_recording_status_text(self) -> str:
+        parts: list[str] = []
+        if self._summary_encoder_session is not None:
+            parts.append(f"编码器 {self._buffer.csv_rows_written} 行")
+        if self._imu_panel.is_recording():
+            parts.append(f"串口 IMU {self._imu_panel.recording_rows_text()}")
+        if self._summary_ros_session is not None:
+            rows = self._summary_ros_session.rows_written_by_stream
+            parts.append(f"ROS odom {rows['odom']} 行")
+            parts.append(f"ROS IMU {rows['imu']} 行")
+        return "记录中: " + ", ".join(parts)
 
     def _toggle_record(self) -> None:
         if not self._buffer.recording:
@@ -773,7 +1016,7 @@ class MainWindow(QMainWindow):
         self._replay_speed = float(self._speed_combo.currentData())
 
     def _clear_data(self) -> None:
-        if self._summary_encoder_session is not None:
+        if self._is_summary_recording():
             self._stop_summary_recording(save=False)
         elif self._buffer.recording:
             self._stop_recording_session(save=False)
@@ -820,7 +1063,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
-        if self._summary_encoder_session is not None:
+        if self._is_summary_recording():
             self._stop_summary_recording(save=False)
         elif self._buffer.recording:
             self._stop_recording_session(save=False)
@@ -828,5 +1071,8 @@ class MainWindow(QMainWindow):
         self._status_timer.stop()
         self._replay_timer.stop()
         self._worker.close_port()
+        self._ros_worker.close_bridge()
+        self._ros_panel.shutdown()
+        self._ros_imu_panel.shutdown()
         self._imu_panel.shutdown()
         super().closeEvent(event)
