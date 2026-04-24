@@ -642,6 +642,8 @@ class MainWindow(QMainWindow):
             })
         if any(self._summary_source(key) == "ros_imu" for key in ("imu_A", "imu_B")):
             files["ros_imu"] = "ros_imu.csv"
+            files["ros_active_imu"] = "ros_active_imu.csv"
+            files["ros_imu_aligned"] = "ros_imu_merged_aligned.csv"
         return files
 
     @staticmethod

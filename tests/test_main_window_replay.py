@@ -294,6 +294,8 @@ class MainWindowReplayTests(unittest.TestCase):
 
             self.assertTrue((session_dir / "ros_odom.csv").exists())
             self.assertTrue((session_dir / "ros_imu.csv").exists())
+            self.assertTrue((session_dir / "ros_active_imu.csv").exists())
+            self.assertTrue((session_dir / "ros_imu_merged_aligned.csv").exists())
             self.assertFalse((session_dir / "encoder.csv").exists())
             self.assertFalse((session_dir / "imu_A.csv").exists())
             with (session_dir / "session.json").open("r", encoding="utf-8") as fh:
@@ -303,6 +305,8 @@ class MainWindowReplayTests(unittest.TestCase):
             self.assertEqual(metadata["devices"]["imu_A"]["source"], "ros_imu")
             self.assertEqual(metadata["files"]["ros_odom"], "ros_odom.csv")
             self.assertEqual(metadata["files"]["ros_imu"], "ros_imu.csv")
+            self.assertEqual(metadata["files"]["ros_active_imu"], "ros_active_imu.csv")
+            self.assertEqual(metadata["files"]["ros_imu_aligned"], "ros_imu_merged_aligned.csv")
 
     def test_radar_sync_checkbox_is_enabled_only_after_successful_connection_test(self) -> None:
         window = MainWindow()

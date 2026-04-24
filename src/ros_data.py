@@ -71,8 +71,29 @@ ROS_SUMMARY_ODOM_HEADER = [
     "orientation_w",
 ]
 
-ROS_SUMMARY_IMU_HEADER = [
+ROS_IMU_RAW_HEADER = [
     "time_s",
+    "frame_count",
+    "accel_x",
+    "accel_y",
+    "accel_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z",
+    "orientation_x",
+    "orientation_y",
+    "orientation_z",
+    "orientation_w",
+    "roll_deg",
+    "pitch_deg",
+    "yaw_deg",
+]
+
+ROS_IMU_ALIGNED_HEADER = [
+    "pair_index",
+    "pair_time",
+    "time_delta_ms",
+    "imu_time_s",
     "imu_frame_count",
     "imu_accel_x",
     "imu_accel_y",
@@ -87,6 +108,7 @@ ROS_SUMMARY_IMU_HEADER = [
     "imu_roll_deg",
     "imu_pitch_deg",
     "imu_yaw_deg",
+    "active_imu_time_s",
     "active_imu_frame_count",
     "active_imu_accel_x",
     "active_imu_accel_y",
@@ -102,6 +124,8 @@ ROS_SUMMARY_IMU_HEADER = [
     "active_imu_pitch_deg",
     "active_imu_yaw_deg",
 ]
+
+ROS_SUMMARY_IMU_HEADER = ROS_IMU_ALIGNED_HEADER
 
 
 class RosTimeSeriesBuffer:
@@ -273,13 +297,18 @@ class RosSummaryRecordingSession:
         "/active_imu": "active_imu",
     }
 
-    def __init__(self) -> None:
+    def __init__(self, imu_align_window_seconds: float = 0.01) -> None:
+        self._imu_align_window_seconds = float(imu_align_window_seconds)
         self._session_dir: Path | None = None
         self._started_at: float | None = None
         self._odom_file = None
-        self._imu_file = None
         self._odom_writer: csv.writer | None = None
-        self._imu_writer: csv.writer | None = None
+        self._imu_files: dict[str, object] = {}
+        self._imu_writers: dict[str, csv.writer] = {}
+        self._imu_samples: dict[str, list[tuple[float, object]]] = {
+            "imu": [],
+            "active_imu": [],
+        }
         self.rows_written_by_stream = {"odom": 0, "imu": 0}
 
     def start_in_directory(self, session_dir: Path, started_at: str | None = None) -> None:
@@ -288,13 +317,26 @@ class RosSummaryRecordingSession:
         self._session_dir.mkdir(parents=True, exist_ok=True)
         self._started_at = perf_counter()
         self._odom_file = (self._session_dir / "ros_odom.csv").open("w", newline="", encoding="utf-8")
-        self._imu_file = (self._session_dir / "ros_imu.csv").open("w", newline="", encoding="utf-8")
         self._odom_writer = csv.writer(self._odom_file)
-        self._imu_writer = csv.writer(self._imu_file)
         self._odom_writer.writerow(ROS_SUMMARY_ODOM_HEADER)
-        self._imu_writer.writerow(ROS_SUMMARY_IMU_HEADER)
+        self._open_imu_raw_files()
         self._flush()
+        self._imu_samples = {"imu": [], "active_imu": []}
         self.rows_written_by_stream = {"odom": 0, "imu": 0}
+
+    def _open_imu_raw_files(self) -> None:
+        if self._session_dir is None:
+            raise RuntimeError("session directory not set")
+        for device_key, filename in (
+            ("imu", "ros_imu.csv"),
+            ("active_imu", "ros_active_imu.csv"),
+        ):
+            handle = (self._session_dir / filename).open("w", newline="", encoding="utf-8")
+            writer = csv.writer(handle)
+            writer.writerow(ROS_IMU_RAW_HEADER)
+            handle.flush()
+            self._imu_files[device_key] = handle
+            self._imu_writers[device_key] = writer
 
     def write_snapshot(self, snapshot: RosSnapshot) -> None:
         if self._started_at is None:
@@ -304,17 +346,22 @@ class RosSummaryRecordingSession:
             self._write_odom(time_s, snapshot)
             return
         if snapshot.last_topic in self.IMU_TOPICS:
-            self._write_imu(time_s, snapshot)
+            self._write_imu_raw(time_s, snapshot)
 
     def finalize(self) -> None:
+        if self._session_dir is None:
+            raise RuntimeError("recording not started")
+        self._close_imu_raw_files()
+        self._write_aligned_imu_rows()
         self._close()
+        self._session_dir = None
 
     def cancel(self) -> None:
         session_dir = self._session_dir
         self._close()
         if session_dir is None:
             return
-        for filename in ("ros_odom.csv", "ros_imu.csv"):
+        for filename in ("ros_odom.csv", "ros_imu.csv", "ros_active_imu.csv", "ros_imu_merged_aligned.csv"):
             path = session_dir / filename
             if path.exists():
                 path.unlink()
@@ -339,19 +386,40 @@ class RosSummaryRecordingSession:
         self.rows_written_by_stream["odom"] += 1
         self._flush()
 
-    def _write_imu(self, time_s: float, snapshot: RosSnapshot) -> None:
-        if self._imu_writer is None:
+    def _write_imu_raw(self, time_s: float, snapshot: RosSnapshot) -> None:
+        device_key = self.IMU_TOPICS[snapshot.last_topic]
+        reading = getattr(snapshot, device_key)
+        if reading.frame_count <= 0:
+            return
+        writer = self._imu_writers.get(device_key)
+        handle = self._imu_files.get(device_key)
+        if writer is None or handle is None:
             raise RuntimeError("recording not started")
-        self._imu_writer.writerow([
+        writer.writerow([
             f"{time_s:.3f}",
-            *self._imu_reading_values(snapshot.imu),
-            *self._imu_reading_values(snapshot.active_imu),
+            *self._imu_reading_values(reading),
         ])
+        handle.flush()
         self.rows_written_by_stream["imu"] += 1
-        self._flush()
+        self._imu_samples[device_key].append((time_s, reading.clone()))
+
+    def _write_aligned_imu_rows(self) -> None:
+        if self._session_dir is None:
+            return
+        rows = _build_ros_imu_aligned_rows(
+            self._imu_samples["imu"],
+            self._imu_samples["active_imu"],
+            self._imu_align_window_seconds,
+        )
+        with (self._session_dir / "ros_imu_merged_aligned.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(ROS_IMU_ALIGNED_HEADER)
+            writer.writerows(rows)
 
     @staticmethod
     def _imu_reading_values(reading) -> list[object]:
+        if reading is None:
+            return [""] * 14
         if reading.frame_count <= 0:
             return [""] * 14
         return [
@@ -374,16 +442,64 @@ class RosSummaryRecordingSession:
     def _flush(self) -> None:
         if self._odom_file is not None:
             self._odom_file.flush()
-        if self._imu_file is not None:
-            self._imu_file.flush()
+        for handle in self._imu_files.values():
+            handle.flush()
 
     def _close(self) -> None:
+        self._close_odom()
+        self._close_imu_raw_files()
+        self._started_at = None
+
+    def _close_odom(self) -> None:
         if self._odom_file is not None:
             self._odom_file.close()
-        if self._imu_file is not None:
-            self._imu_file.close()
-        self._odom_file = None
-        self._imu_file = None
+            self._odom_file = None
         self._odom_writer = None
-        self._imu_writer = None
-        self._started_at = None
+
+    def _close_imu_raw_files(self) -> None:
+        for handle in self._imu_files.values():
+            handle.close()
+        self._imu_files = {}
+        self._imu_writers = {}
+
+
+def _build_ros_imu_aligned_rows(
+    imu_samples: list[tuple[float, object]],
+    active_samples: list[tuple[float, object]],
+    align_window_seconds: float,
+) -> list[list[object]]:
+    rows: list[list[object]] = []
+    imu_index = 0
+    active_index = 0
+    while imu_index < len(imu_samples) and active_index < len(active_samples):
+        imu_time, imu_reading = imu_samples[imu_index]
+        active_time, active_reading = active_samples[active_index]
+        delta = active_time - imu_time
+        if abs(delta) <= align_window_seconds + 1e-12:
+            rows.append(_ros_imu_aligned_row(len(rows), imu_time, delta, imu_reading, active_time, active_reading))
+            imu_index += 1
+            active_index += 1
+        elif imu_time < active_time:
+            imu_index += 1
+        else:
+            active_index += 1
+    return rows
+
+
+def _ros_imu_aligned_row(
+    pair_index: int,
+    imu_time: float,
+    delta_s: float,
+    imu_reading,
+    active_time: float,
+    active_reading,
+) -> list[object]:
+    return [
+        pair_index,
+        f"{imu_time:.6f}",
+        f"{abs(delta_s) * 1000.0:.3f}",
+        f"{imu_time:.6f}",
+        *RosSummaryRecordingSession._imu_reading_values(imu_reading),
+        f"{active_time:.6f}",
+        *RosSummaryRecordingSession._imu_reading_values(active_reading),
+    ]
