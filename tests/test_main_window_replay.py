@@ -253,7 +253,10 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertGreaterEqual(encoder_source.findData("serial"), 0)
         self.assertGreaterEqual(encoder_source.findData("ros_odom"), 0)
         self.assertGreaterEqual(imu_source.findData("serial"), 0)
-        self.assertGreaterEqual(imu_source.findData("ros_imu"), 0)
+        self.assertGreaterEqual(imu_source.findData("ros_imu:/imu"), 0)
+        self.assertGreaterEqual(imu_source.findData("ros_imu:/active_imu"), 0)
+        self.assertEqual(imu_source.itemText(imu_source.findData("ros_imu:/imu")), "ROS /imu")
+        self.assertEqual(imu_source.itemText(imu_source.findData("ros_imu:/active_imu")), "ROS /active_imu")
 
     def test_summary_recording_can_use_ros_odom_and_received_ros_imu_sources(self) -> None:
         window = MainWindow()
@@ -261,10 +264,10 @@ class MainWindowReplayTests(unittest.TestCase):
             window._summary_rows["encoder"]["source_combo"].findData("ros_odom")
         )
         window._summary_rows["imu_A"]["source_combo"].setCurrentIndex(
-            window._summary_rows["imu_A"]["source_combo"].findData("ros_imu")
+            window._summary_rows["imu_A"]["source_combo"].findData("ros_imu:/imu")
         )
         window._summary_rows["imu_B"]["source_combo"].setCurrentIndex(
-            window._summary_rows["imu_B"]["source_combo"].findData("ros_imu")
+            window._summary_rows["imu_B"]["source_combo"].findData("ros_imu:/active_imu")
         )
 
         with temp_dir() as tmp:
@@ -302,7 +305,10 @@ class MainWindowReplayTests(unittest.TestCase):
                 metadata = json.load(fh)
             self.assertEqual(metadata["devices"]["encoder"]["source"], "ros_odom")
             self.assertEqual(metadata["devices"]["encoder"]["topic"], "/odom")
-            self.assertEqual(metadata["devices"]["imu_A"]["source"], "ros_imu")
+            self.assertEqual(metadata["devices"]["imu_A"]["source"], "ros_imu:/imu")
+            self.assertEqual(metadata["devices"]["imu_A"]["topic"], "/imu")
+            self.assertEqual(metadata["devices"]["imu_B"]["source"], "ros_imu:/active_imu")
+            self.assertEqual(metadata["devices"]["imu_B"]["topic"], "/active_imu")
             self.assertEqual(metadata["files"]["ros_odom"], "ros_odom.csv")
             self.assertEqual(metadata["files"]["ros_imu"], "ros_imu.csv")
             self.assertEqual(metadata["files"]["ros_active_imu"], "ros_active_imu.csv")

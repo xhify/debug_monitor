@@ -354,11 +354,14 @@ class MainWindow(QMainWindow):
         grid = QGridLayout(group)
 
         source_combo = QComboBox()
+        source_combo.setMinimumContentsLength(10)
+        source_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         source_combo.addItem("串口", "serial")
         if key == "encoder":
             source_combo.addItem("ROS /odom", "ros_odom")
         else:
-            source_combo.addItem("ROS IMU", "ros_imu")
+            source_combo.addItem("ROS /imu", "ros_imu:/imu")
+            source_combo.addItem("ROS /active_imu", "ros_imu:/active_imu")
         source_combo.currentIndexChanged.connect(lambda: self._on_summary_source_changed(key))
 
         port_combo = QComboBox()
@@ -603,11 +606,15 @@ class MainWindow(QMainWindow):
 
     def _summary_uses_ros(self) -> bool:
         return self._summary_source("encoder") == "ros_odom" or any(
-            self._summary_source(key) == "ros_imu" for key in ("imu_A", "imu_B")
+            self._summary_is_ros_imu_source(self._summary_source(key)) for key in ("imu_A", "imu_B")
         )
 
     def _summary_uses_serial_imu(self) -> bool:
         return any(self._summary_source(key) == "serial" for key in ("imu_A", "imu_B"))
+
+    @staticmethod
+    def _summary_is_ros_imu_source(source: str) -> bool:
+        return source.startswith("ros_imu:")
 
     def _summary_device_metadata(self, key: str) -> dict[str, object]:
         source = self._summary_source(key)
@@ -640,15 +647,17 @@ class MainWindow(QMainWindow):
                 "imu_metadata": "imu_session.json",
                 "imu_aligned": "imu_merged_aligned.csv",
             })
-        if any(self._summary_source(key) == "ros_imu" for key in ("imu_A", "imu_B")):
+        if any(self._summary_is_ros_imu_source(self._summary_source(key)) for key in ("imu_A", "imu_B")):
             files["ros_imu"] = "ros_imu.csv"
             files["ros_active_imu"] = "ros_active_imu.csv"
             files["ros_imu_aligned"] = "ros_imu_merged_aligned.csv"
         return files
 
-    @staticmethod
-    def _summary_imu_topic(key: str) -> str:
-        return "/imu" if key == "imu_A" else "/active_imu"
+    def _summary_imu_topic(self, key: str) -> str:
+        source = self._summary_source(key)
+        if source == "ros_imu:/active_imu":
+            return "/active_imu"
+        return "/imu"
 
     def _stop_summary_recording(self, save: bool) -> Path | None:
         encoder_session = self._summary_encoder_session
@@ -888,7 +897,11 @@ class MainWindow(QMainWindow):
     def _ros_imu_frame_count(self, key: str) -> int:
         if self._latest_ros_snapshot is None:
             return 0
-        reading = self._latest_ros_snapshot.imu if key == "imu_A" else self._latest_ros_snapshot.active_imu
+        reading = (
+            self._latest_ros_snapshot.active_imu
+            if self._summary_imu_topic(key) == "/active_imu"
+            else self._latest_ros_snapshot.imu
+        )
         return reading.frame_count
 
     def _summary_recording_status_text(self) -> str:
