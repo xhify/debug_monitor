@@ -1,296 +1,336 @@
 # WHEELTEC C50X 调试监视器
 
-实时电机调试上位机软件，通过串口接收 100Hz 数据流，可视化绘图并支持 PID、速度限制、USART1 目标速度和目标 PWM 在线调整，并显示 AFC 增量输出。
+WHEELTEC C50X 多底盘机器人调试上位机。程序用于串口电机调试、双 IMU 采集、ROS 数据监视、ROS IMU 可视化，以及编码器/IMU/ROS/雷达的同步实验记录。
 
----
+主要能力：
+
+- 编码器调试串口实时接收、绘图、统计分析、CSV 记录与回放
+- PID、速度限制、USART1 目标速度、目标 PWM 在线下发
+- 双 YESENSE IMU 独立串口采集、曲线显示和会话记录
+- rosbridge 连接 `/odom`、`/imu`、`/active_imu`、`/PowerVoltage`
+- 发布 `/cmd_vel` 和 `/line_follow_control`
+- 汇总模块统一记录编码器、IMU、ROS 和可选雷达数据
 
 ## 1. 环境准备
 
-### 1.1 安装 Python
+### 1.1 Python
 
-需要 Python 3.10 或更高版本。下载地址：https://www.python.org/downloads/
-
-安装时勾选 **"Add Python to PATH"**。
-
-验证安装：
+建议使用 Python 3.11 或更高版本。
 
 ```bash
 python --version
 ```
 
-### 1.2 安装 uv
+### 1.2 uv
 
-uv 是一个高性能的 Python 包管理器，用于创建虚拟环境和安装依赖。
+项目使用 uv 管理虚拟环境和依赖。
 
-**Windows（PowerShell）：**
+Windows PowerShell：
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-**Windows（pip 方式）：**
+也可以通过 pip 安装：
 
 ```bash
 pip install uv
 ```
 
-**Linux / macOS：**
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-验证安装：
+验证：
 
 ```bash
 uv --version
 ```
 
-### 1.3 创建虚拟环境并安装依赖
+### 1.3 创建环境
 
 ```bash
 cd debug_monitor
-
-# 创建虚拟环境
 uv venv .venv
 
-# 激活虚拟环境
-# Windows (Git Bash / MSYS2):
-source .venv/Scripts/activate
-# Windows (CMD):
-.venv\Scripts\activate.bat
-# Windows (PowerShell):
+# Windows PowerShell
 .venv\Scripts\Activate.ps1
-# Linux / macOS:
-source .venv/bin/activate
 
-# 安装所有依赖
+# Windows CMD
+.venv\Scripts\activate.bat
+
+# Git Bash / MSYS2
+source .venv/Scripts/activate
+
 uv pip install -r requirements.txt
 ```
 
-## 2. 启动程序
-
-确保虚拟环境已激活，然后运行：
+## 2. 启动
 
 ```bash
 python src/main.py
 ```
 
-## 3. 硬件连接
+程序启动后顶部可以切换模块：
 
-1. 使用 USB 转 TTL 模块连接机器人调试串口（UART1）
-   - TX（PA9）→ 转换模块 RX
-   - RX（PA10）→ 转换模块 TX
-   - GND → GND
-2. 将 USB 转 TTL 模块插入电脑 USB 口
-3. 记下设备管理器中显示的 COM 端口号（如 COM3）
+- **汇总**：统一配置编码器、IMU A、IMU B 来源并同步记录
+- **编码器**：调试串口实时绘图、命令下发、CSV 记录/回放
+- **IMU**：两路 YESENSE IMU 串口采集和记录
+- **ROS**：rosbridge 数据监视、速度命令和 ROS CSV 记录
+- **ROS IMU**：`/imu` 与 `/active_imu` 双 IMU 曲线监视
 
-## 4. 使用说明
+## 3. 硬件与外部服务
 
-### 4.1 界面布局
+### 3.1 编码器调试串口
 
-``` 
-+—— 顶部：串口连接 ——————————————————————————————————+
-|                              |  实时/回放数值         |
-|  速度曲线图（8条曲线）        |  （T法/M法/融合/目标）   |
-|  PWM/AFC 输出图（4条曲线）    |  固件参数 / 统计分析    |
-|  [暂停] [记录] [模式] [回放]  |                        |
-+——————————————————————————————+————————————————————————+
-|  PID 设置                    |  速度参数 / 目标控制     |
-|  (两轮/A/B) Kp Ki Kd [发送]  |  [设置] [发送PWM] [查询] |
-+——————————————————————————————+————————————————————————+
-|  状态栏：帧数 | 错误数 | 记录状态                      |
-+————————————————————————————————————————————————————————————+
+使用 USB 转 TTL 模块连接机器人 UART1：
+
+| 机器人 | USB 转 TTL |
+|--------|------------|
+| TX PA9 | RX |
+| RX PA10 | TX |
+| GND | GND |
+
+默认参数：`115200 bps, 8N1`。
+
+### 3.2 YESENSE IMU 串口
+
+IMU 模块支持 IMU A / IMU B 两路独立串口。常用波特率列表包含：
+
+```text
+460800, 230400, 115200, 57600, 38400, 19200, 9600, 921600
 ```
 
-### 4.2 连接串口
+### 3.3 ROS / rosbridge
 
-1. 在顶部面板的 **端口** 下拉框选择对应 COM 口（如 `COM3 - USB Serial Port`）
-2. **波特率** 保持默认 `115200`
-3. 点击 **连接**
+ROS 功能通过 rosbridge WebSocket 连接，默认地址：
 
-连接成功后状态栏显示“已连接”，绘图区开始实时滚动。
+```text
+host: 192.168.0.14
+port: 9090
+```
 
-如果端口列表为空，点击 **刷新** 重新扫描。
+订阅主题：
 
-### 4.3 实时绘图
-
-连接后自动开始绘制，包含两个子图：
-
-**速度图（上）— 8 条曲线：**
-| 曲线 | 颜色 | 线型 |
+| 主题 | 类型 | 用途 |
 |------|------|------|
-| T法 A | 深红 | 实线 |
-| T法 B | 深蓝 | 实线 |
-| M法 A | 橙色 | 虚线 |
-| M法 B | 青色 | 虚线 |
-| 融合 A | 黄色 | 实线（粗） |
-| 融合 B | 青绿 | 实线（粗） |
-| 目标速度 A | 绿色 | 虚线 |
-| 目标速度 B | 紫色 | 点线 |
+| `/odom` | `nav_msgs/Odometry` | 轮速、角速度、位姿 |
+| `/imu` | `sensor_msgs/Imu` | ROS IMU A |
+| `/active_imu` | `sensor_msgs/Imu` | ROS 活动 IMU |
+| `/PowerVoltage` | `std_msgs/Float32` | 电压 |
 
-**PWM/AFC 输出图（下）— 4 条曲线：**
-| 曲线 | 颜色 |
-|------|------|
-| PWM A | 橙色 |
-| PWM B | 紫色 |
-| AFC A | 紫色虚线 |
-| AFC B | 青绿虚线 |
+发布主题：
 
-**交互操作：**
-- **鼠标滚轮**：缩放
-- **鼠标左键拖拽**：平移
-- **鼠标右键**：弹出菜单，可重置视图（Auto Range）
-- **暂停绘图** 勾选框：冻结曲线显示，但数据仍在后台接收
+| 主题 | 类型 | 用途 |
+|------|------|------|
+| `/cmd_vel` | `geometry_msgs/Twist` | 速度控制 |
+| `/line_follow_control` | `simple_follower/LineFollowControl` | PID 直行控制 |
 
-### 4.4 查看实时数据和回放数据
+### 3.4 雷达同步
 
-右侧 **实时数据/回放数据** 面板显示当前选中数据源的最新一帧：
-- T法原始速度 A/B（m/s）
-- M法原始速度 A/B（m/s）
-- 融合反馈速度 A/B（m/s）
-- 目标速度 A/B（m/s）
-- PWM 输出 A/B
-- AFC 输出 A/B
-- 实时模式下显示帧率，回放模式下显示当前回放时间
+汇总模块可以通过本机 TCP SCPI 控制雷达软件录制：
 
-### 4.5 统计分析面板
-
-右侧新增 **统计分析** 面板，统一对当前数据源进行计算：
-- 实时模式：统计最近 10 秒窗口
-- 回放模式：统计当前回放范围
-
-每个电机 A/B 都会显示：
-- 均值、标准差、最小值、最大值、峰峰值
-- 误差均值、最大绝对误差、稳态误差
-- 上升时间、调节时间、超调量（有有效阶跃时显示）
-
-### 4.6 调整 PID 参数
-
-1. 选择目标：**两轮同步** / **电机 A** / **电机 B**
-2. 填写 **Kp**、**Ki**、**Kd** 值
-3. 点击 **设置 PID** 发送
-
-> 建议先点击 **查询参数** 获取当前固件参数值，程序会自动回填到输入框中，在此基础上微调。
-
-> 注意：PID 参数修改仅运行时生效，机器人断电后恢复为默认值。
-
-### 4.7 查询固件参数
-
-点击 **查询参数** 按钮，右侧 **固件参数** 面板将显示：
-- 电机 A/B 的 Kp、Ki、Kd
-- 遥控速度限制
-- 最大速度限制
-- 电机加速平滑步进
-
-### 4.8 调整速度限制参数
-
-在 **速度参数** 区可分别设置：
-- 遥控速度限制
-- 最大速度限制
-- 电机加速平滑步进
-
-每项修改都会立即通过对应命令写入固件运行时参数。
-
-### 4.9 下发 USART1 目标速度 / PWM
-
-在 **USART1 目标控制** 区可下发：
-- A/B 两轮目标速度，对应协议 `0x23`
-- A/B 两轮目标 PWM，对应协议 `0x24`
-
-两种模式互斥，后发送的命令会覆盖前一种模式。
-
-### 4.10 数据记录（流式 CSV）
-
-1. 点击 **开始记录**，程序会立即在临时目录创建一个临时 CSV 文件并开始逐帧写入
-2. 记录过程中状态栏会显示已写入行数
-3. 点击 **停止记录** 后弹出另存为对话框
-4. 如果确认保存，临时文件会移动为正式 CSV 文件
-5. 如果取消保存，当前临时文件会被自动删除，不会留下垃圾文件
-
-CSV 文件包含以下列：
-
-| 列名 | 说明 |
-|------|------|
-| frame_index | 帧序号 |
-| time_s | 时间（秒） |
-| t_raw_a / t_raw_b | T法原始速度 |
-| m_raw_a / m_raw_b | M法原始速度 |
-| final_a / final_b | 融合反馈速度 |
-| target_a / target_b | 目标速度 |
-| output_a / output_b | PWM 输出 |
-| afc_output_a / afc_output_b | AFC 增量输出 |
-
-### 4.11 CSV 回放
-
-1. 点击 **加载 CSV** 选择之前保存的记录文件
-2. 选择数据源为 **回放**
-3. 使用 **播放/暂停**、进度滑条和 **0.5x / 1x / 2x** 倍速控件浏览回放
-4. 图表、数值面板和统计分析面板会同步切换到回放数据
-
-回放模式不会影响后台串口接收，也不影响继续进行实时录制。
-
-### 4.12 清空数据
-
-点击 **清空数据** 按钮可清除实时缓冲区中的所有数据，图表和数值面板会立即恢复为空白状态。如果正在记录数据，会先自动取消本次录制再清空。
-
-### 4.13 断开连接
-
-点击 **断开** 按钮。如果正在记录数据，程序会自动停止并取消当前录制。
-
-关闭窗口时也会自动清理连接和记录资源。
-
-## 5. 常见问题
-
-**Q: 端口列表中找不到我的串口？**
-A: 确认 USB 转 TTL 模块已插入并安装驱动（CH340/CP2102/FT232R），然后点击“刷新”。
-
-**Q: 连接后没有数据？**
-A: 检查接线（TX/RX 是否交叉连接）、波特率是否为 115200、机器人是否已上电运行。
-
-**Q: 绘图卡顿？**
-A: 程序已内置降采样和视口裁剪优化，正常情况下不会卡顿。如仍有问题，尝试缩小窗口或减少显示的曲线数量（在图例中点击曲线名可隐藏）。
-
-**Q: 非 AKM 底盘为什么 T 法或 M 法速度显示为 0？**
-A: 协议定义这两组原始测速字段仅在 AKM 底盘构建时有效，其他底盘可能固定回传 0，这是正常现象。
-
-## 6. 项目结构
-
+```text
+host: 127.0.0.1
+port: 5026
+identify: *IDN?
+start: MEMMory:RECord:STARt <filename>
+stop: MEMM:REC:STOP
 ```
+
+只有点击 **测试雷达连接** 并收到 `PHASELOCK...` 识别响应后，才会启用 **同步雷达录制**。
+
+## 4. 编码器模块
+
+编码器模块负责调试串口数据流：
+
+- 解析 48 字节数据帧，约 100Hz
+- 实时显示 T 法、M 法、融合速度、目标速度、PWM 和 AFC 输出
+- 上方速度图显示 8 条速度曲线
+- 下方 PWM/AFC 图显示电机 A/B 输出
+- 支持暂停绘图、清空数据、CSV 记录和 CSV 回放
+- 支持统计分析最近 10 秒实时窗口或当前回放窗口
+
+命令区支持：
+
+- 两轮同步或单轮独立设置 PID
+- 查询固件参数
+- 设置遥控速度限制、最大速度、平滑步进
+- 下发 USART1 目标速度，协议 `0x23`
+- 下发 USART1 目标 PWM，协议 `0x24`
+
+CSV 记录字段包含：
+
+```text
+frame_index, time_s,
+t_raw_a, t_raw_b,
+m_raw_a, m_raw_b,
+final_a, final_b,
+target_a, target_b,
+output_a, output_b,
+afc_output_a, afc_output_b
+```
+
+回放流程：
+
+1. 点击 **加载 CSV**
+2. 模式切换为 **回放**
+3. 使用播放/暂停、进度条和 `0.5x / 1x / 2x` 浏览
+
+回放不会停止后台串口接收，也不会影响继续录制实时数据。
+
+## 5. IMU 模块
+
+IMU 模块用于两路 YESENSE IMU 独立采集：
+
+- IMU A / IMU B 各自选择端口、波特率、连接状态
+- 曲线显示加速度、角速度、欧拉角
+- 支持暂停绘图和清空数据
+- 一键开始/停止双 IMU 会话记录
+
+独立 IMU 记录默认写入 `recordings/imu_session_<timestamp>/`：
+
+| 文件 | 说明 |
+|------|------|
+| `imu_A.csv` | IMU A 原始样本 |
+| `imu_B.csv` | IMU B 原始样本 |
+| `merged_aligned.csv` | A/B 时间对齐后的合并数据 |
+| `session.json` | 设备配置、行数、备注和对齐参数 |
+
+## 6. ROS 模块
+
+ROS 模块用于 rosbridge 数据监视和控制：
+
+- 显示 `/odom` 中的左右轮速度、角速度和位姿
+- 显示 `/imu` 基础 IMU 字段和 `/PowerVoltage` 电压
+- 绘制实际左右轮速度与目标左右轮速度
+- 可发布 `/cmd_vel`
+- 可发布 `/line_follow_control` 的 PID 前进、后退、停止控制
+- 可单独将 ROS 快照记录为 CSV
+
+## 7. ROS IMU 模块
+
+ROS IMU 模块专门对比 `/imu` 和 `/active_imu`：
+
+- 同屏显示 Acc X/Y/Z、Gyro X/Y/Z、Roll/Pitch/Yaw 九个子图
+- `/imu` 使用实线，`/active_imu` 使用虚线
+- 支持暂停绘图、清空数据、显示原始数据
+- 支持 50 ms、100 ms、200 ms、500 ms 平滑窗口
+- 右侧显示两路 IMU 当前数值和帧数
+
+## 8. 汇总模块
+
+汇总模块用于一次实验中统一记录多源数据。可配置三类设备：
+
+| 设备 | 可选来源 |
+|------|----------|
+| 编码器 | 串口、ROS `/odom` |
+| IMU A | 串口、ROS `/imu`、ROS `/active_imu` |
+| IMU B | 串口、ROS `/imu`、ROS `/active_imu` |
+
+使用流程：
+
+1. 为编码器、IMU A、IMU B 选择来源
+2. 串口来源需要选择端口和波特率并连接
+3. ROS 来源会使用 ROS 模块中的 rosbridge 地址
+4. 可填写实验备注
+5. 如需雷达同步，先测试雷达连接，再勾选 **同步雷达录制**
+6. 点击 **全部开始记录**
+7. 点击 **全部停止记录** 保存会话
+
+汇总记录默认写入：
+
+```text
+recordings/session_<timestamp>/
+```
+
+可能生成的文件：
+
+| 文件 | 条件 | 说明 |
+|------|------|------|
+| `session.json` | 总是生成 | 汇总元数据、设备来源、文件清单、雷达信息 |
+| `encoder.csv` | 编码器来源为串口 | 编码器调试串口数据 |
+| `imu_A.csv` | 任一 IMU 来源为串口 | IMU A 串口样本 |
+| `imu_B.csv` | 任一 IMU 来源为串口 | IMU B 串口样本 |
+| `imu_session.json` | 任一 IMU 来源为串口 | 串口 IMU 会话元数据 |
+| `imu_merged_aligned.csv` | 任一 IMU 来源为串口 | 串口 IMU A/B 对齐数据 |
+| `ros_odom.csv` | 编码器来源为 ROS `/odom` | ROS 里程计数据 |
+| `ros_imu.csv` | 任一 IMU 来源为 ROS IMU | ROS `/imu` 原始数据 |
+| `ros_active_imu.csv` | 任一 IMU 来源为 ROS IMU | ROS `/active_imu` 原始数据 |
+| `ros_imu_merged_aligned.csv` | 任一 IMU 来源为 ROS IMU | ROS 双 IMU 对齐数据 |
+
+如果启用雷达同步，雷达软件会使用同一时间戳生成 `.bin` 记录文件，文件名写入 `session.json` 的 `devices.radar.filename`。
+
+## 9. 项目结构
+
+```text
 debug_monitor/
-├── README.md                    # 本文件
-├── CLAUDE.md                    # 项目开发说明
-├── requirements.txt             # Python 依赖
+├── README.md
+├── AGENTS.md
+├── CLAUDE.md
+├── requirements.txt
 ├── docs/
-│   └── Debug_UART_Protocol.md   # 串口通信协议文档
-└── src/
-    ├── main.py                  # 程序入口
-    ├── protocol.py              # 协议解析与命令组装
-    ├── serial_worker.py         # 串口通信线程
-    ├── data_buffer.py           # 数据缓冲区与流式录制桥接
-    ├── recording_session.py     # 流式录制会话
-    ├── replay_data.py           # CSV 回放数据模型
-    ├── analytics.py             # 统计分析计算
-    ├── main_window.py           # 主窗口
-    └── widgets/                 # 界面组件
-        ├── serial_panel.py      # 串口连接面板
-        ├── plot_panel.py        # 实时/回放绘图
-        ├── data_panel.py        # 数值显示
-        ├── analysis_panel.py    # 统计分析面板
-        ├── command_panel.py     # 命令发送
-        └── param_panel.py       # 参数显示
+│   └── Debug_UART_Protocol.md
+├── src/
+│   ├── main.py
+│   ├── main_window.py
+│   ├── protocol.py
+│   ├── serial_worker.py
+│   ├── data_buffer.py
+│   ├── recording_session.py
+│   ├── replay_data.py
+│   ├── analytics.py
+│   ├── imu_protocol.py
+│   ├── imu_serial_worker.py
+│   ├── imu_buffer.py
+│   ├── imu_recording.py
+│   ├── ros_bridge_worker.py
+│   ├── ros_data.py
+│   ├── radar_scpi.py
+│   └── widgets/
+│       ├── serial_panel.py
+│       ├── plot_panel.py
+│       ├── data_panel.py
+│       ├── analysis_panel.py
+│       ├── command_panel.py
+│       ├── param_panel.py
+│       ├── imu_panel.py
+│       ├── ros_panel.py
+│       └── ros_imu_panel.py
+└── tests/
 ```
 
-## 7. 技术规格
+## 10. 技术规格
 
 | 项目 | 规格 |
 |------|------|
-| 串口协议 | UART 115200 bps, 8N1 |
-| 数据帧 | 48 字节, 100Hz, 帧头 0xAA 0x55 |
-| 参数帧 | 40 字节, 按需触发 |
-| 校验方式 | 逐字节 XOR |
-| 字节序 | 小端序 (Little-Endian) |
-| 绘图刷新率 | ~30 fps |
-| 数据缓冲 | 3000 点（约 30 秒） |
+| 编码器串口 | UART 115200 bps, 8N1 |
+| 编码器数据帧 | 48 字节，约 100Hz，帧头 `0xAA 0x55` |
+| 参数帧 | 40 字节，按需触发 |
+| 校验 | 逐字节 XOR |
+| 字节序 | 小端序 |
+| 绘图刷新 | 约 30 fps |
+| 编码器实时缓冲 | 3000 点，约 30 秒 |
+| IMU 实时缓冲 | 3000 点 |
+| ROS 连接 | rosbridge WebSocket |
+| 雷达控制 | TCP SCPI，默认 `127.0.0.1:5026` |
 
-详细协议说明见 [docs/Debug_UART_Protocol.md](docs/Debug_UART_Protocol.md)。
+串口协议详情见 [docs/Debug_UART_Protocol.md](docs/Debug_UART_Protocol.md)。
+
+## 11. 常见问题
+
+**端口列表中找不到串口怎么办？**
+
+确认 USB 转 TTL 或 IMU 串口模块已插入并安装驱动，然后点击 **刷新**。
+
+**编码器连接后没有数据怎么办？**
+
+检查 TX/RX 是否交叉连接、GND 是否共地、波特率是否为 `115200`、机器人是否已上电运行。
+
+**ROS 模块连接失败怎么办？**
+
+确认机器人端 rosbridge 已启动，电脑能访问对应 IP 和端口，并且防火墙没有阻断 WebSocket 连接。
+
+**雷达同步无法勾选怎么办？**
+
+必须先点击 **测试雷达连接**，并让雷达控制软件在 `127.0.0.1:5026` 响应 `PHASELOCK...` 识别信息。
+
+**T 法或 M 法速度一直为 0 正常吗？**
+
+非 AKM 底盘可能不会回传这些原始测速字段，显示 0 属于协议兼容行为。
