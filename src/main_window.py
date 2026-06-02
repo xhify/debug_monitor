@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from analytics import compute_channel_metrics
 from data_buffer import COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B, DataBuffer
+from mapping_update_client import MappingUpdateClient
 from recording_session import RecordingSession
 from radar_scpi import RadarScpiClient
 from replay_data import ReplayData
@@ -86,9 +87,11 @@ class MainWindow(QMainWindow):
         self._summary_session_dir: Path | None = None
         self._summary_radar_recording = False
         self._summary_radar_filename = ""
+        self._summary_map_update_enabled = True
         self._latest_ros_snapshot = None
         self._ros_connected = False
         self._radar_client = RadarScpiClient()
+        self._mapping_update_client = MappingUpdateClient()
 
         self._setup_ui()
         self._setup_timers()
@@ -344,6 +347,10 @@ class MainWindow(QMainWindow):
         self._summary_radar_sync_cb.setEnabled(False)
         radar_row.addWidget(self._summary_radar_sync_cb)
 
+        self._summary_mapping_freeze_btn = QPushButton("冻结建图")
+        self._summary_mapping_freeze_btn.clicked.connect(self._toggle_summary_mapping_freeze)
+        radar_row.addWidget(self._summary_mapping_freeze_btn)
+
         self._summary_radar_status_label = QLabel("雷达未测试")
         radar_row.addWidget(self._summary_radar_status_label, stretch=1)
         record_layout.addLayout(radar_row)
@@ -533,6 +540,25 @@ class MainWindow(QMainWindow):
         self._summary_radar_status_label.setText(f"雷达已连接: {response}")
         self._status_label.setText("雷达连接测试通过")
 
+    def _toggle_summary_mapping_freeze(self) -> None:
+        target_enabled = not self._summary_map_update_enabled
+        try:
+            self._mapping_update_client.set_map_update_enabled(target_enabled)
+        except Exception as exc:
+            self._summary_radar_status_label.setText(f"建图冻结命令失败: {exc}")
+            self._status_label.setText(f"建图冻结命令失败: {exc}")
+            return
+
+        self._summary_map_update_enabled = target_enabled
+        if target_enabled:
+            self._summary_mapping_freeze_btn.setText("冻结建图")
+            self._summary_radar_status_label.setText("建图更新已恢复")
+            self._status_label.setText("已执行 rosparam set /mapping/map_update_enable true")
+            return
+        self._summary_mapping_freeze_btn.setText("恢复建图")
+        self._summary_radar_status_label.setText("建图更新已冻结")
+        self._status_label.setText("已执行 rosparam set /mapping/map_update_enable false")
+
     def _summary_should_record_radar(self) -> bool:
         return self._summary_radar_sync_cb.isEnabled() and self._summary_radar_sync_cb.isChecked()
 
@@ -638,6 +664,7 @@ class MainWindow(QMainWindow):
             "host": getattr(self._radar_client, "host", "127.0.0.1"),
             "port": getattr(self._radar_client, "port", 5026),
             "filename": self._summary_radar_filename,
+            "map_update_enable": self._summary_map_update_enabled,
         }
 
     def _summary_files_metadata(self) -> dict[str, str]:

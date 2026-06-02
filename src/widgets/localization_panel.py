@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 
+from localization_fusion import MapPoint, read_ascii_ply_xy, save_fused_map_trajectory
 from localization_buffer import LocalizationBuffer, LocalizationSample
 from ros_odometry_client import RosOdometryWorker
 
@@ -42,6 +43,8 @@ class LocalizationPanel(QWidget):
         self._worker.connection_changed.connect(self._on_connection_changed)
         self._labels: dict[str, QLabel] = {}
         self._recording_started = False
+        self._map_path: Path | None = None
+        self._map_points: list[MapPoint] = []
         self._setup_ui()
         self._setup_timer()
         self._set_connected(False)
@@ -100,6 +103,14 @@ class LocalizationPanel(QWidget):
         plot_item = self._trajectory_plot.getPlotItem()
         plot_item.setDownsampling(mode="peak")
         plot_item.setClipToView(True)
+        self._map_curve = self._trajectory_plot.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=2,
+            symbolBrush=pg.mkBrush("#94a3b8"),
+            symbolPen=None,
+            name="FAST-LIO 建图",
+        )
         self._trajectory_curve = self._trajectory_plot.plot(
             pen=pg.mkPen("#1565c0", width=2),
             name="FAST-LIO2 轨迹",
@@ -165,6 +176,18 @@ class LocalizationPanel(QWidget):
         self._report_btn.clicked.connect(self._write_report_dialog)
         row2.addWidget(self._report_btn)
         layout.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        self._select_map_btn = QPushButton("选择建图 PLY")
+        self._select_map_btn.clicked.connect(self._select_map_dialog)
+        row3.addWidget(self._select_map_btn)
+        self._fused_save_btn = QPushButton("融合显示并保存")
+        self._fused_save_btn.clicked.connect(self._write_fused_map_dialog)
+        row3.addWidget(self._fused_save_btn)
+        self._map_label = QLabel("未选择建图")
+        row3.addWidget(self._map_label, stretch=1)
+        layout.addLayout(row3)
+
         self._record_label = QLabel("")
         layout.addWidget(self._record_label)
         return group
@@ -297,6 +320,56 @@ class LocalizationPanel(QWidget):
         self._trajectory_curve.setData([], [])
         for label in self._labels.values():
             label.setText("---")
+
+    def _select_map_dialog(self) -> None:
+        filepath, _ = QFileDialog.getOpenFileName(self, "选择 FAST-LIO 建图 PLY", "", "PLY 文件 (*.ply)")
+        if filepath:
+            self.load_map_for_test(Path(filepath))
+
+    def load_map_for_test(self, path: Path) -> None:
+        try:
+            points = read_ascii_ply_xy(Path(path), max_points=50000)
+        except Exception as exc:
+            self._map_label.setText(f"建图加载失败: {exc}")
+            self._record_label.setText(f"建图加载失败: {exc}")
+            return
+        self._map_path = Path(path)
+        self._map_points = points
+        self._map_curve.setData(
+            [point.x for point in points],
+            [point.y for point in points],
+        )
+        self._map_label.setText(f"建图: {self._map_path.name} ({len(points)} 点)")
+
+    def _write_fused_map_dialog(self) -> None:
+        if self._map_path is None:
+            self._select_map_dialog()
+            if self._map_path is None:
+                return
+        default_path = self._default_output_path("fastlio_map_trajectory_fused", ".svg")
+        filepath, _ = QFileDialog.getSaveFileName(self, "保存建图轨迹融合 SVG", str(default_path), "SVG 文件 (*.svg)")
+        if not filepath:
+            return
+        self._save_fused_map(Path(filepath))
+
+    def _save_fused_map(self, path: Path) -> Path | None:
+        if self._map_path is None:
+            self._record_label.setText("请先选择建图 PLY")
+            return None
+        xs, ys = self._buffer.plot_xy()
+        if not xs:
+            self._record_label.setText("当前没有 FAST-LIO 轨迹")
+            return None
+        summary = save_fused_map_trajectory(
+            self._map_path,
+            list(zip(xs, ys)),
+            Path(path),
+        )
+        saved = Path(str(summary["output"]))
+        self._record_label.setText(
+            f"融合图已保存 {saved}，地图 {summary['map_points']} 点，轨迹 {summary['trajectory_points']} 点"
+        )
+        return saved
 
     def _toggle_recording(self) -> None:
         if not self._buffer.recording:
