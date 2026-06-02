@@ -130,6 +130,16 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertEqual(window._imu_module_btn.text(), "IMU")
         self.assertEqual(window._ros_module_btn.text(), "ROS")
         self.assertEqual(window._ros_imu_module_btn.text(), "ROS IMU")
+        self.assertEqual(window._localization_module_btn.text(), "定位精度")
+
+    def test_main_window_switches_to_localization_module(self) -> None:
+        window = MainWindow()
+
+        window._localization_module_btn.click()
+
+        self.assertEqual(window._module_stack.currentWidget(), window._localization_panel)
+        self.assertTrue(window._localization_module_btn.isChecked())
+        self.assertFalse(window._encoder_module_btn.isChecked())
 
     def test_main_window_switches_to_imu_module(self) -> None:
         window = MainWindow()

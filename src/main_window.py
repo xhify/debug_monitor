@@ -45,6 +45,7 @@ from widgets.analysis_panel import AnalysisPanel
 from widgets.command_panel import CommandPanel
 from widgets.data_panel import DataPanel
 from widgets.imu_panel import ImuPanel
+from widgets.localization_panel import LocalizationPanel
 from widgets.param_panel import ParamPanel
 from widgets.plot_panel import PlotPanel
 from widgets.ros_imu_panel import RosImuPanel
@@ -216,6 +217,7 @@ class MainWindow(QMainWindow):
         self._imu_panel = ImuPanel()
         self._ros_panel = RosPanel()
         self._ros_imu_panel = RosImuPanel()
+        self._localization_panel = LocalizationPanel()
         self._ros_panel.connect_requested.connect(self._ros_worker.open_bridge)
         self._ros_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
         self._ros_panel.cmd_vel_requested.connect(self._ros_worker.publish_cmd_vel)
@@ -228,6 +230,7 @@ class MainWindow(QMainWindow):
         self._module_stack.addWidget(self._imu_panel)
         self._module_stack.addWidget(self._ros_panel)
         self._module_stack.addWidget(self._ros_imu_panel)
+        self._module_stack.addWidget(self._localization_panel)
         self._module_stack.setCurrentWidget(self._encoder_page)
 
         self._status_label = QLabel("就绪")
@@ -279,10 +282,20 @@ class MainWindow(QMainWindow):
         self._module_button_group.addButton(self._ros_imu_module_btn)
         switch_row.addWidget(self._ros_imu_module_btn)
 
+        self._localization_module_btn = QPushButton("定位精度")
+        self._localization_module_btn.setCheckable(True)
+        self._localization_module_btn.clicked.connect(lambda: self._switch_module("localization"))
+        self._module_button_group.addButton(self._localization_module_btn)
+        switch_row.addWidget(self._localization_module_btn)
+
         switch_row.addStretch()
         root_layout.addLayout(switch_row)
 
     def _switch_module(self, module: str) -> None:
+        if module == "localization":
+            self._module_stack.setCurrentWidget(self._localization_panel)
+            self._status_label.setText("FAST-LIO2 定位精度测试")
+            return
         if module == "summary":
             self._module_stack.setCurrentWidget(self._summary_page)
             self._status_label.setText("汇总模块")
@@ -1076,5 +1089,6 @@ class MainWindow(QMainWindow):
         self._ros_worker.close_bridge()
         self._ros_panel.shutdown()
         self._ros_imu_panel.shutdown()
+        self._localization_panel.shutdown()
         self._imu_panel.shutdown()
         super().closeEvent(event)
