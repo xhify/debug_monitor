@@ -1,4 +1,4 @@
-"""FAST-LIO2 localization stability test panel."""
+"""FAST-LIO2 localization stability and frozen-map fusion panel."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -26,15 +25,31 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 
-from localization_fusion import MapPoint, read_ascii_ply_xy, save_fused_map_trajectory
 from localization_buffer import LocalizationBuffer, LocalizationSample
+from localization_fusion import (
+    MapPoint,
+    export_frozen_map_trajectory_zip,
+)
+from map_fetch_client import MapFetchClient, MapFetchConfig
+from mapping_update_client import (
+    DEFAULT_MAPPING_SSH_HOST,
+    MAP_UPDATE_PARAM,
+    MappingUpdateClient,
+    ROS_SETUP_COMMAND,
+)
 from ros_odometry_client import RosOdometryWorker
 
 
 class LocalizationPanel(QWidget):
-    """Read-only FAST-LIO2 odometry monitor, recorder, and straight-line evaluator."""
+    """Read-only FAST-LIO2 odometry monitor plus frozen map fusion export."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        mapping_update_client: MappingUpdateClient | None = None,
+        map_fetch_client: MapFetchClient | None = None,
+    ) -> None:
         super().__init__(parent)
         self._buffer = LocalizationBuffer(max_points=5000)
         self._worker = RosOdometryWorker()
@@ -43,8 +58,15 @@ class LocalizationPanel(QWidget):
         self._worker.connection_changed.connect(self._on_connection_changed)
         self._labels: dict[str, QLabel] = {}
         self._recording_started = False
-        self._map_path: Path | None = None
-        self._map_points: list[MapPoint] = []
+        self._mapping_update_client = mapping_update_client
+        self._map_fetch_client = map_fetch_client
+        self._owns_mapping_client = mapping_update_client is None
+        self._owns_fetch_client = map_fetch_client is None
+        self._map_update_enabled = True
+        self._map_frozen = False
+        self._frozen_map_points: list[MapPoint] = []
+        self._frozen_map_path: Path | None = None
+        self._map_fetch_metadata: dict[str, object] = {}
         self._setup_ui()
         self._setup_timer()
         self._set_connected(False)
@@ -92,13 +114,13 @@ class LocalizationPanel(QWidget):
         return group
 
     def _build_plot_group(self) -> QGroupBox:
-        group = QGroupBox("轨迹")
+        group = QGroupBox("轨迹 / 冻结地图俯视融合")
         layout = QVBoxLayout(group)
         self._trajectory_plot = pg.PlotWidget()
         self._trajectory_plot.setBackground("w")
         self._trajectory_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._trajectory_plot.setLabel("bottom", "x0_aligned", units="m")
-        self._trajectory_plot.setLabel("left", "y0_aligned", units="m")
+        self._trajectory_plot.setLabel("bottom", "x0_aligned / map x", units="m")
+        self._trajectory_plot.setLabel("left", "y0_aligned / map y", units="m")
         self._trajectory_plot.addLegend(offset=(10, 10))
         plot_item = self._trajectory_plot.getPlotItem()
         plot_item.setDownsampling(mode="peak")
@@ -109,11 +131,27 @@ class LocalizationPanel(QWidget):
             symbolSize=2,
             symbolBrush=pg.mkBrush("#94a3b8"),
             symbolPen=None,
-            name="FAST-LIO 建图",
+            name="冻结点云地图",
         )
         self._trajectory_curve = self._trajectory_plot.plot(
             pen=pg.mkPen("#1565c0", width=2),
             name="FAST-LIO2 轨迹",
+        )
+        self._start_curve = self._trajectory_plot.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=9,
+            symbolBrush=pg.mkBrush("#0284c7"),
+            symbolPen=None,
+            name="起点",
+        )
+        self._current_curve = self._trajectory_plot.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=9,
+            symbolBrush=pg.mkBrush("#ea580c"),
+            symbolPen=None,
+            name="当前点",
         )
         self._reference_curve = self._trajectory_plot.plot(
             [0.0, 10.0],
@@ -157,7 +195,7 @@ class LocalizationPanel(QWidget):
         return group
 
     def _build_control_group(self) -> QGroupBox:
-        group = QGroupBox("测试控制")
+        group = QGroupBox("测试与建图控制")
         layout = QVBoxLayout(group)
         row1 = QHBoxLayout()
         self._set_origin_btn = QPushButton("设置当前为起点")
@@ -178,16 +216,34 @@ class LocalizationPanel(QWidget):
         layout.addLayout(row2)
 
         row3 = QHBoxLayout()
-        self._select_map_btn = QPushButton("选择建图 PLY")
-        self._select_map_btn.clicked.connect(self._select_map_dialog)
-        row3.addWidget(self._select_map_btn)
-        self._fused_save_btn = QPushButton("融合显示并保存")
-        self._fused_save_btn.clicked.connect(self._write_fused_map_dialog)
-        row3.addWidget(self._fused_save_btn)
-        self._map_label = QLabel("未选择建图")
-        row3.addWidget(self._map_label, stretch=1)
+        self._mapping_freeze_btn = QPushButton("冻结建图")
+        self._mapping_freeze_btn.clicked.connect(self._toggle_mapping_freeze)
+        row3.addWidget(self._mapping_freeze_btn)
+        self._save_map_trajectory_btn = QPushButton("保存地图与轨迹数据")
+        self._save_map_trajectory_btn.clicked.connect(self._write_frozen_package_dialog)
+        row3.addWidget(self._save_map_trajectory_btn)
         layout.addLayout(row3)
 
+        config_form = QFormLayout()
+        self._mapping_host_edit = QLineEdit(DEFAULT_MAPPING_SSH_HOST)
+        self._freeze_command_edit = QLineEdit(f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} false")
+        self._resume_command_edit = QLineEdit(f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} true")
+        self._snapshot_command_edit = QLineEdit("")
+        self._remote_map_path_edit = QLineEdit("/tmp/frozen_fastlio_map.ply")
+        self._local_map_path_edit = QLineEdit("")
+        for title, widget in (
+            ("远程主机:", self._mapping_host_edit),
+            ("冻结命令:", self._freeze_command_edit),
+            ("恢复命令:", self._resume_command_edit),
+            ("保存地图命令:", self._snapshot_command_edit),
+            ("远程地图路径:", self._remote_map_path_edit),
+            ("本地地图路径:", self._local_map_path_edit),
+        ):
+            config_form.addRow(title, widget)
+        layout.addLayout(config_form)
+
+        self._map_label = QLabel("建图未冻结")
+        layout.addWidget(self._map_label)
         self._record_label = QLabel("")
         layout.addWidget(self._record_label)
         return group
@@ -308,6 +364,12 @@ class LocalizationPanel(QWidget):
             self._labels[key].setText(f"{value:.4f}")
         xs, ys = self._buffer.plot_xy()
         self._trajectory_curve.setData(xs, ys)
+        if xs:
+            self._start_curve.setData([xs[0]], [ys[0]])
+            self._current_curve.setData([xs[-1]], [ys[-1]])
+        else:
+            self._start_curve.setData([], [])
+            self._current_curve.setData([], [])
         end_x = max(10.0, max(xs) if xs else 10.0)
         self._reference_curve.setData([0.0, end_x], [0.0, 0.0])
 
@@ -318,56 +380,99 @@ class LocalizationPanel(QWidget):
     def _clear(self) -> None:
         self._buffer.clear()
         self._trajectory_curve.setData([], [])
+        self._start_curve.setData([], [])
+        self._current_curve.setData([], [])
         for label in self._labels.values():
             label.setText("---")
 
-    def _select_map_dialog(self) -> None:
-        filepath, _ = QFileDialog.getOpenFileName(self, "选择 FAST-LIO 建图 PLY", "", "PLY 文件 (*.ply)")
-        if filepath:
-            self.load_map_for_test(Path(filepath))
+    def _toggle_mapping_freeze(self) -> None:
+        if self._map_update_enabled:
+            self._freeze_mapping_and_fetch_map()
+            return
+        self._resume_mapping()
 
-    def load_map_for_test(self, path: Path) -> None:
+    def _freeze_mapping_and_fetch_map(self) -> None:
         try:
-            points = read_ascii_ply_xy(Path(path), max_points=50000)
+            mapping = self._current_mapping_update_client()
+            freeze_result = mapping.set_map_update_enabled(False)
         except Exception as exc:
-            self._map_label.setText(f"建图加载失败: {exc}")
-            self._record_label.setText(f"建图加载失败: {exc}")
+            self._record_label.setText(f"建图冻结失败: {exc}")
             return
-        self._map_path = Path(path)
-        self._map_points = points
-        self._map_curve.setData(
-            [point.x for point in points],
-            [point.y for point in points],
+
+        self._map_update_enabled = False
+        self._map_frozen = True
+        self._mapping_freeze_btn.setText("恢复建图")
+        self._record_label.setText("建图已冻结，正在获取冻结地图...")
+        try:
+            fetcher = self._current_map_fetch_client()
+            result = fetcher.fetch_once(self._map_cache_dir())
+            points = fetcher.read_points(result.local_path)
+        except Exception as exc:
+            self._record_label.setText(f"建图已冻结，但地图获取失败: {exc}")
+            self._map_label.setText("冻结地图获取失败")
+            self._frozen_map_points = []
+            self._frozen_map_path = None
+            return
+
+        self._frozen_map_points = points
+        self._frozen_map_path = result.local_path
+        self._map_fetch_metadata = {
+            "map_source": result.source,
+            "map_freeze_method": freeze_result.get("command", freeze_result.get("method", "")),
+            "raw_map_file": result.raw_file_name,
+        }
+        self._map_curve.setData([point.x for point in points], [point.y for point in points])
+        self._map_label.setText(f"冻结地图: {result.raw_file_name} ({len(points)} 点)")
+        self._record_label.setText(f"建图已冻结，已获取 {len(points)} 个地图点")
+
+    def _resume_mapping(self) -> None:
+        try:
+            self._current_mapping_update_client().set_map_update_enabled(True)
+        except Exception as exc:
+            self._record_label.setText(f"恢复建图失败: {exc}")
+            return
+        self._map_update_enabled = True
+        self._map_frozen = False
+        self._mapping_freeze_btn.setText("冻结建图")
+        self._map_curve.setData([], [])
+        self._map_label.setText("建图已恢复，当前只显示实时轨迹")
+        self._record_label.setText("建图更新已恢复")
+
+    def _write_frozen_package_dialog(self) -> None:
+        default_path = self._default_output_path("frozen_map_trajectory", ".zip")
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存地图与轨迹数据",
+            str(default_path),
+            "ZIP 数据包 (*.zip)",
         )
-        self._map_label.setText(f"建图: {self._map_path.name} ({len(points)} 点)")
+        if filepath:
+            self._save_frozen_package(Path(filepath))
 
-    def _write_fused_map_dialog(self) -> None:
-        if self._map_path is None:
-            self._select_map_dialog()
-            if self._map_path is None:
-                return
-        default_path = self._default_output_path("fastlio_map_trajectory_fused", ".svg")
-        filepath, _ = QFileDialog.getSaveFileName(self, "保存建图轨迹融合 SVG", str(default_path), "SVG 文件 (*.svg)")
-        if not filepath:
-            return
-        self._save_fused_map(Path(filepath))
-
-    def _save_fused_map(self, path: Path) -> Path | None:
-        if self._map_path is None:
-            self._record_label.setText("请先选择建图 PLY")
+    def _save_frozen_package(self, path: Path) -> Path | None:
+        if not self._map_frozen or not self._frozen_map_points:
+            self._record_label.setText("请先冻结建图并获取地图")
             return None
-        xs, ys = self._buffer.plot_xy()
-        if not xs:
-            self._record_label.setText("当前没有 FAST-LIO 轨迹")
+        rows = self._buffer.rows()
+        if not rows:
+            self._record_label.setText("当前没有轨迹数据")
             return None
-        summary = save_fused_map_trajectory(
-            self._map_path,
-            list(zip(xs, ys)),
+        summary = export_frozen_map_trajectory_zip(
             Path(path),
+            map_points=self._frozen_map_points,
+            trajectory_rows=rows,
+            metadata={
+                "coordinate_frame": "FAST-LIO map x-y top-down; trajectory uses x0_aligned/y0_aligned",
+                "odometry_topic": self._topic_edit.text().strip() or "/Odometry",
+                "map_source": self._map_fetch_metadata.get("map_source", ""),
+                "map_freeze_method": self._map_fetch_metadata.get("map_freeze_method", ""),
+                "use_aligned_xy": True,
+            },
+            raw_map_path=self._frozen_map_path,
         )
         saved = Path(str(summary["output"]))
         self._record_label.setText(
-            f"融合图已保存 {saved}，地图 {summary['map_points']} 点，轨迹 {summary['trajectory_points']} 点"
+            f"已保存 {saved}，地图 {summary['map_points']} 点，轨迹 {summary['trajectory_points']} 点"
         )
         return saved
 
@@ -407,6 +512,31 @@ class LocalizationPanel(QWidget):
             correction_vz=self._correction_vz_spin.value(),
             safety_state=self._safety_state_edit.text().strip() or "monitor_only",
         )
+
+    def _current_mapping_update_client(self) -> MappingUpdateClient:
+        if self._mapping_update_client is None or self._owns_mapping_client:
+            self._mapping_update_client = MappingUpdateClient(
+                ssh_host=self._mapping_host_edit.text().strip() or DEFAULT_MAPPING_SSH_HOST,
+                freeze_command=self._freeze_command_edit.text().strip() or None,
+                resume_command=self._resume_command_edit.text().strip() or None,
+            )
+        return self._mapping_update_client
+
+    def _current_map_fetch_client(self) -> MapFetchClient:
+        if self._map_fetch_client is None or self._owns_fetch_client:
+            self._map_fetch_client = MapFetchClient(
+                MapFetchConfig(
+                    ssh_host=self._mapping_host_edit.text().strip() or DEFAULT_MAPPING_SSH_HOST,
+                    remote_map_path=self._remote_map_path_edit.text().strip(),
+                    snapshot_command=self._snapshot_command_edit.text().strip(),
+                    local_map_path=self._local_map_path_edit.text().strip(),
+                )
+            )
+        return self._map_fetch_client
+
+    @staticmethod
+    def _map_cache_dir() -> Path:
+        return Path(tempfile.gettempdir()) / "debug_monitor_frozen_maps"
 
     def shutdown(self) -> None:
         self._refresh_timer.stop()

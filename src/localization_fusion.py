@@ -1,19 +1,41 @@
-"""PLY map and FAST-LIO trajectory fusion rendering."""
+"""Frozen FAST-LIO map and trajectory fusion helpers."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import csv
+import json
+import shutil
+import tempfile
+import zipfile
+from dataclasses import dataclass, fields
+from datetime import datetime
 from html import escape
 from math import ceil
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Sequence
+
+from localization_buffer import LOCALIZATION_CSV_HEADER, LocalizationSample
 
 
 @dataclass(frozen=True, slots=True)
 class MapPoint:
     x: float
     y: float
+    z: float = 0.0
     intensity: float = 0.0
+
+
+def read_map_points(path: Path, max_points: int | None = None) -> list[MapPoint]:
+    """Read a supported frozen-map file into the internal point format."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".ply":
+        return read_ascii_ply_xy(path, max_points=max_points)
+    if suffix == ".csv":
+        return read_csv_map_points(path, max_points=max_points)
+    if suffix == ".pcd":
+        return read_ascii_pcd_points(path, max_points=max_points)
+    raise ValueError(f"不支持的地图格式: {path.suffix or path}")
 
 
 def read_ascii_ply_xy(path: Path, max_points: int | None = None) -> list[MapPoint]:
@@ -48,6 +70,7 @@ def read_ascii_ply_xy(path: Path, max_points: int | None = None) -> list[MapPoin
             raise ValueError(f"PLY 文件缺少 vertex 数量: {path}")
         x_index = _property_index(properties, "x")
         y_index = _property_index(properties, "y")
+        z_index = properties.index("z") if "z" in properties else None
         intensity_index = properties.index("intensity") if "intensity" in properties else None
 
         points: list[MapPoint] = []
@@ -58,11 +81,69 @@ def read_ascii_ply_xy(path: Path, max_points: int | None = None) -> list[MapPoin
             values = line.strip().split()
             if len(values) <= max(x_index, y_index):
                 continue
-            intensity = 0.0
-            if intensity_index is not None and len(values) > intensity_index:
-                intensity = float(values[intensity_index])
-            points.append(MapPoint(float(values[x_index]), float(values[y_index]), intensity))
+            z = _float_at(values, z_index)
+            intensity = _float_at(values, intensity_index)
+            points.append(MapPoint(float(values[x_index]), float(values[y_index]), z, intensity))
 
+    return _downsample(points, max_points)
+
+
+def read_csv_map_points(path: Path, max_points: int | None = None) -> list[MapPoint]:
+    points: list[MapPoint] = []
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"CSV 地图缺少表头: {path}")
+        lowered = {name.lower(): name for name in reader.fieldnames}
+        if "x" not in lowered or "y" not in lowered:
+            raise ValueError(f"CSV 地图至少需要 x/y 字段: {path}")
+        for row in reader:
+            points.append(
+                MapPoint(
+                    float(row[lowered["x"]]),
+                    float(row[lowered["y"]]),
+                    _float_cell(row.get(lowered.get("z", ""))),
+                    _float_cell(row.get(lowered.get("intensity", ""))),
+                )
+            )
+    return _downsample(points, max_points)
+
+
+def read_ascii_pcd_points(path: Path, max_points: int | None = None) -> list[MapPoint]:
+    path = Path(path)
+    fields_line = ""
+    data_ascii = False
+    points: list[MapPoint] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            lower = stripped.lower()
+            if lower.startswith("fields "):
+                fields_line = stripped
+            if lower.startswith("data "):
+                data_ascii = lower == "data ascii"
+                break
+        if not data_ascii:
+            raise ValueError(f"仅支持 ASCII PCD: {path}")
+        names = fields_line.split()[1:]
+        x_index = _property_index(names, "x")
+        y_index = _property_index(names, "y")
+        z_index = names.index("z") if "z" in names else None
+        intensity_index = names.index("intensity") if "intensity" in names else None
+        for line in handle:
+            values = line.strip().split()
+            if len(values) <= max(x_index, y_index):
+                continue
+            points.append(
+                MapPoint(
+                    float(values[x_index]),
+                    float(values[y_index]),
+                    _float_at(values, z_index),
+                    _float_at(values, intensity_index),
+                )
+            )
     return _downsample(points, max_points)
 
 
@@ -76,7 +157,7 @@ def save_fused_map_trajectory(
     point_radius: float = 0.9,
     max_map_points: int | None = 50000,
 ) -> dict[str, object]:
-    map_points = read_ascii_ply_xy(Path(map_ply), max_points=max_map_points)
+    map_points = read_map_points(Path(map_ply), max_points=max_map_points)
     return render_fused_map_trajectory_svg(
         map_points,
         trajectory_points,
@@ -104,11 +185,7 @@ def render_fused_map_trajectory_svg(
 
     all_x = [point.x for point in map_points] + [point[0] for point in trajectory]
     all_y = [point.y for point in map_points] + [point[1] for point in trajectory]
-    if all_x and all_y:
-        min_x, max_x = min(all_x), max(all_x)
-        min_y, max_y = min(all_y), max(all_y)
-    else:
-        min_x = max_x = min_y = max_y = 0.0
+    min_x, max_x, min_y, max_y = _bounds(all_x, all_y)
 
     plot_size = max(1.0, float(size - 2 * padding))
     x_span = max(max_x - min_x, 1e-9)
@@ -169,9 +246,97 @@ def render_fused_map_trajectory_svg(
     }
 
 
+def export_frozen_map_trajectory_zip(
+    output_zip: Path,
+    *,
+    map_points: Sequence[MapPoint],
+    trajectory_rows: Sequence[LocalizationSample],
+    metadata: dict[str, object],
+    raw_map_path: Path | None = None,
+) -> dict[str, object]:
+    output_zip = Path(output_zip)
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    preview_name = "preview.svg"
+    raw_map_archive_name = ""
+    if raw_map_path:
+        raw_map_archive_name = f"raw_map/{Path(raw_map_path).name}"
+
+    with tempfile.TemporaryDirectory(prefix="frozen_map_trajectory_") as temp_name:
+        temp_dir = Path(temp_name)
+        map_csv = temp_dir / "frozen_map_points.csv"
+        trajectory_csv = temp_dir / "trajectory_points.csv"
+        preview_svg = temp_dir / preview_name
+        metadata_json = temp_dir / "metadata.json"
+
+        _write_map_csv(map_csv, map_points)
+        _write_trajectory_csv(trajectory_csv, trajectory_rows)
+        render_fused_map_trajectory_svg(
+            map_points,
+            [(row.x0_aligned, row.y0_aligned) for row in trajectory_rows],
+            preview_svg,
+            map_source=str(metadata.get("map_source", "")),
+        )
+        merged_metadata = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "coordinate_frame": metadata.get("coordinate_frame", "FAST-LIO map x-y top-down"),
+            "odometry_topic": metadata.get("odometry_topic", "/Odometry"),
+            "map_source": metadata.get("map_source", ""),
+            "map_freeze_method": metadata.get("map_freeze_method", metadata.get("freeze_method", "")),
+            "map_point_count": len(map_points),
+            "trajectory_point_count": len(trajectory_rows),
+            "use_aligned_xy": bool(metadata.get("use_aligned_xy", True)),
+            "preview_file": preview_name,
+            "raw_map_file": raw_map_archive_name,
+        }
+        metadata_json.write_text(
+            json.dumps(merged_metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(metadata_json, "metadata.json")
+            archive.write(map_csv, "frozen_map_points.csv")
+            archive.write(trajectory_csv, "trajectory_points.csv")
+            archive.write(preview_svg, preview_name)
+            if raw_map_path:
+                raw_copy = temp_dir / Path(raw_map_archive_name)
+                raw_copy.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(raw_map_path, raw_copy)
+                archive.write(raw_copy, raw_map_archive_name)
+
+    return {
+        "output": str(output_zip),
+        "map_points": len(map_points),
+        "trajectory_points": len(trajectory_rows),
+        "preview": preview_name,
+    }
+
+
+def _write_map_csv(path: Path, points: Sequence[MapPoint]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["x", "y", "z", "intensity"])
+        writer.writeheader()
+        for point in points:
+            writer.writerow({
+                "x": point.x,
+                "y": point.y,
+                "z": point.z,
+                "intensity": point.intensity,
+            })
+
+
+def _write_trajectory_csv(path: Path, rows: Sequence[LocalizationSample]) -> None:
+    valid_fields = {field.name for field in fields(LocalizationSample)}
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LOCALIZATION_CSV_HEADER)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({name: getattr(row, name) for name in LOCALIZATION_CSV_HEADER if name in valid_fields})
+
+
 def _property_index(properties: list[str], name: str) -> int:
     if name not in properties:
-        raise ValueError(f"PLY vertex 缺少 {name} 属性")
+        raise ValueError(f"点云缺少 {name} 字段")
     return properties.index(name)
 
 
@@ -180,3 +345,24 @@ def _downsample(points: list[MapPoint], max_points: int | None) -> list[MapPoint
         return points
     step = max(1, ceil(len(points) / max_points))
     return points[::step]
+
+
+def _float_at(values: Sequence[str], index: int | None) -> float:
+    if index is None or index >= len(values):
+        return 0.0
+    return float(values[index])
+
+
+def _float_cell(value: object) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    return float(text) if text else 0.0
+
+
+def _bounds(xs: Iterable[float], ys: Iterable[float]) -> tuple[float, float, float, float]:
+    x_values = list(xs)
+    y_values = list(ys)
+    if x_values and y_values:
+        return min(x_values), max(x_values), min(y_values), max(y_values)
+    return 0.0, 0.0, 0.0, 0.0

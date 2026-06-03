@@ -80,21 +80,6 @@ class FakeRadarClient:
         self.stopped += 1
 
 
-class FakeMappingUpdateClient:
-    def __init__(self, fail: bool = False) -> None:
-        self.fail = fail
-        self.enabled_values: list[bool] = []
-
-    def set_map_update_enabled(self, enabled: bool) -> dict[str, object]:
-        if self.fail:
-            raise RuntimeError("rosparam failed")
-        self.enabled_values.append(enabled)
-        return {
-            "enabled": enabled,
-            "command": f"rosparam set /mapping/map_update_enable {str(enabled).lower()}",
-        }
-
-
 class MainWindowReplayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -346,26 +331,11 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertTrue(window._summary_radar_sync_cb.isEnabled())
         self.assertIn("PHASELOCK", window._summary_radar_status_label.text())
 
-    def test_summary_mapping_freeze_button_toggles_ros_map_update_param(self) -> None:
+    def test_summary_page_does_not_expose_mapping_freeze_control(self) -> None:
         window = MainWindow()
-        mapping = FakeMappingUpdateClient()
-        window._mapping_update_client = mapping
 
-        self.assertEqual(window._summary_mapping_freeze_btn.text(), "冻结建图")
-
-        window._toggle_summary_mapping_freeze()
-
-        self.assertEqual(mapping.enabled_values, [False])
-        self.assertFalse(window._summary_map_update_enabled)
-        self.assertEqual(window._summary_mapping_freeze_btn.text(), "恢复建图")
-        self.assertIn("已冻结", window._summary_radar_status_label.text())
-
-        window._toggle_summary_mapping_freeze()
-
-        self.assertEqual(mapping.enabled_values, [False, True])
-        self.assertTrue(window._summary_map_update_enabled)
-        self.assertEqual(window._summary_mapping_freeze_btn.text(), "冻结建图")
-        self.assertIn("已恢复", window._summary_radar_status_label.text())
+        self.assertFalse(hasattr(window, "_summary_mapping_freeze_btn"))
+        self.assertFalse(hasattr(window, "_toggle_summary_mapping_freeze"))
 
     def test_summary_recording_starts_and_stops_radar_when_sync_is_checked(self) -> None:
         window = MainWindow()

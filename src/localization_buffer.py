@@ -408,6 +408,10 @@ class LocalizationBuffer:
                 [row.y0_aligned for row in self._rows],
             )
 
+    def rows(self) -> list[LocalizationSample]:
+        with self._lock:
+            return list(self._rows)
+
     @property
     def recording(self) -> bool:
         with self._lock:

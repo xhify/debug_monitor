@@ -59,6 +59,29 @@ class MappingUpdateClientTests(unittest.TestCase):
         self.assertIn("/mapping/map_update_enable", str(ctx.exception))
         self.assertIn("unknown parameter", str(ctx.exception))
 
+    def test_custom_remote_commands_can_match_actual_mapping_package(self) -> None:
+        calls = []
+
+        def runner(args, capture_output, text, check, timeout):
+            calls.append(args)
+            return CompletedProcess(stdout="ok")
+
+        client = MappingUpdateClient(
+            ssh_host="robot",
+            freeze_command="rosservice call /fastlio/freeze_mapping",
+            resume_command="rosservice call /fastlio/resume_mapping",
+            timeout=2.0,
+            runner=runner,
+        )
+
+        frozen = client.set_map_update_enabled(False)
+        resumed = client.set_map_update_enabled(True)
+
+        self.assertEqual(calls[0], ["ssh", "robot", "rosservice call /fastlio/freeze_mapping"])
+        self.assertEqual(calls[1], ["ssh", "robot", "rosservice call /fastlio/resume_mapping"])
+        self.assertEqual(frozen["method"], "custom")
+        self.assertEqual(resumed["method"], "custom")
+
 
 if __name__ == "__main__":
     unittest.main()
