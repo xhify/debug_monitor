@@ -88,6 +88,13 @@ class LocalizationPanelTests(unittest.TestCase):
         self.assertEqual(fetcher.config.map_topic, "/Laser_map")
         self.assertEqual(fetcher.config.remote_map_path, "")
 
+    def test_trajectory_plot_keeps_equal_xy_scale_for_map_overlay(self) -> None:
+        panel = LocalizationPanel()
+
+        view_box = panel._trajectory_plot.getPlotItem().getViewBox()
+
+        self.assertEqual(view_box.state["aspectLocked"], 1.0)
+
     def test_freeze_failure_does_not_toggle_button_or_fetch_map(self) -> None:
         fetcher = FakeMapFetchClient()
         panel = LocalizationPanel(

@@ -125,6 +125,7 @@ class LocalizationPanel(QWidget):
         plot_item = self._trajectory_plot.getPlotItem()
         plot_item.setDownsampling(mode="peak")
         plot_item.setClipToView(True)
+        plot_item.getViewBox().setAspectLocked(True, ratio=1.0)
         self._map_curve = self._trajectory_plot.plot(
             pen=None,
             symbol="o",
