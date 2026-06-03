@@ -119,8 +119,8 @@ class LocalizationPanel(QWidget):
         self._trajectory_plot = pg.PlotWidget()
         self._trajectory_plot.setBackground("w")
         self._trajectory_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._trajectory_plot.setLabel("bottom", "x0_aligned / map x", units="m")
-        self._trajectory_plot.setLabel("left", "y0_aligned / map y", units="m")
+        self._trajectory_plot.setLabel("bottom", "trajectory x / x0_aligned", units="m")
+        self._trajectory_plot.setLabel("left", "trajectory y / y0_aligned", units="m")
         self._trajectory_plot.addLegend(offset=(10, 10))
         plot_item = self._trajectory_plot.getPlotItem()
         plot_item.setDownsampling(mode="peak")
@@ -366,7 +366,7 @@ class LocalizationPanel(QWidget):
         }
         for key, value in stats_map.items():
             self._labels[key].setText(f"{value:.4f}")
-        xs, ys = self._buffer.plot_xy()
+        xs, ys = self._trajectory_plot_xy()
         self._trajectory_curve.setData(xs, ys)
         if xs:
             self._start_curve.setData([xs[0]], [ys[0]])
@@ -376,6 +376,12 @@ class LocalizationPanel(QWidget):
             self._current_curve.setData([], [])
         end_x = max(10.0, max(xs) if xs else 10.0)
         self._reference_curve.setData([0.0, end_x], [0.0, 0.0])
+
+    def _trajectory_plot_xy(self) -> tuple[list[float], list[float]]:
+        if self._map_frozen and self._frozen_map_points:
+            rows = self._buffer.rows()
+            return [row.x for row in rows], [row.y for row in rows]
+        return self._buffer.plot_xy()
 
     def _set_current_origin(self) -> None:
         self._buffer.set_current_pose_as_origin()
@@ -466,11 +472,11 @@ class LocalizationPanel(QWidget):
             map_points=self._frozen_map_points,
             trajectory_rows=rows,
             metadata={
-                "coordinate_frame": "FAST-LIO map x-y top-down; trajectory uses x0_aligned/y0_aligned",
+                "coordinate_frame": "camera_init x-y top-down; map and trajectory both use FAST-LIO raw x/y",
                 "odometry_topic": self._topic_edit.text().strip() or "/Odometry",
                 "map_source": self._map_fetch_metadata.get("map_source", ""),
                 "map_freeze_method": self._map_fetch_metadata.get("map_freeze_method", ""),
-                "use_aligned_xy": True,
+                "use_aligned_xy": False,
             },
             raw_map_path=self._frozen_map_path,
         )

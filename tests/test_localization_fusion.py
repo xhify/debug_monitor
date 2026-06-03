@@ -95,7 +95,7 @@ class LocalizationFusionTests(unittest.TestCase):
         tmp = temp_dir()
         try:
             raw_map = tmp / "frozen_map.csv"
-            raw_map.write_text("x,y,z,intensity\n0,0,0,10\n1,0,0,20\n", encoding="utf-8")
+            raw_map.write_text("x,y,z,intensity\n100,50,0,10\n101,50,0,20\n", encoding="utf-8")
             output_zip = tmp / "frozen_map_trajectory.zip"
             trajectory = [
                 LocalizationSample(
@@ -104,8 +104,8 @@ class LocalizationFusionTests(unittest.TestCase):
                     source="/Odometry",
                     frame_id="camera_init",
                     child_frame_id="body",
-                    x=0.0,
-                    y=0.0,
+                    x=100.0,
+                    y=50.0,
                     z=0.0,
                     qx=0.0,
                     qy=0.0,
@@ -123,8 +123,8 @@ class LocalizationFusionTests(unittest.TestCase):
                     source="/Odometry",
                     frame_id="camera_init",
                     child_frame_id="body",
-                    x=1.0,
-                    y=0.25,
+                    x=101.0,
+                    y=50.25,
                     z=0.0,
                     qx=0.0,
                     qy=0.0,
@@ -150,7 +150,7 @@ class LocalizationFusionTests(unittest.TestCase):
                     "odometry_topic": "/Odometry",
                     "map_source": "remote file",
                     "freeze_method": "rosparam:/mapping/map_update_enable=false",
-                    "use_aligned_xy": True,
+                    "use_aligned_xy": False,
                 },
                 raw_map_path=raw_map,
             )
@@ -167,8 +167,12 @@ class LocalizationFusionTests(unittest.TestCase):
                 metadata = json.loads(archive.read("metadata.json").decode("utf-8"))
                 self.assertEqual(metadata["map_point_count"], 2)
                 self.assertEqual(metadata["trajectory_point_count"], 2)
+                self.assertFalse(metadata["use_aligned_xy"])
                 self.assertEqual(metadata["preview_file"], "preview.svg")
                 self.assertEqual(metadata["raw_map_file"], "raw_map/frozen_map.csv")
+                preview = archive.read("preview.svg").decode("utf-8")
+                self.assertIn('data-x-range="100.0,101.0"', preview)
+                self.assertIn('data-y-range="50.0,50.25"', preview)
                 rows = list(csv.DictReader(
                     archive.read("trajectory_points.csv").decode("utf-8").splitlines()
                 ))

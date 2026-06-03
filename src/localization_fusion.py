@@ -272,19 +272,19 @@ def export_frozen_map_trajectory_zip(
         _write_trajectory_csv(trajectory_csv, trajectory_rows)
         render_fused_map_trajectory_svg(
             map_points,
-            [(row.x0_aligned, row.y0_aligned) for row in trajectory_rows],
+            [(row.x, row.y) for row in trajectory_rows],
             preview_svg,
             map_source=str(metadata.get("map_source", "")),
         )
         merged_metadata = {
             "created_at": datetime.now().isoformat(timespec="seconds"),
-            "coordinate_frame": metadata.get("coordinate_frame", "FAST-LIO map x-y top-down"),
+            "coordinate_frame": metadata.get("coordinate_frame", "camera_init x-y top-down"),
             "odometry_topic": metadata.get("odometry_topic", "/Odometry"),
             "map_source": metadata.get("map_source", ""),
             "map_freeze_method": metadata.get("map_freeze_method", metadata.get("freeze_method", "")),
             "map_point_count": len(map_points),
             "trajectory_point_count": len(trajectory_rows),
-            "use_aligned_xy": bool(metadata.get("use_aligned_xy", True)),
+            "use_aligned_xy": bool(metadata.get("use_aligned_xy", False)),
             "preview_file": preview_name,
             "raw_map_file": raw_map_archive_name,
         }

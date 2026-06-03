@@ -152,6 +152,19 @@ class LocalizationPanelTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_frozen_map_overlay_uses_camera_init_trajectory_coordinates(self) -> None:
+        panel = LocalizationPanel()
+        panel._map_frozen = True
+        panel._frozen_map_points = [MapPoint(100.0, 50.0, 0.0)]
+        panel._buffer.append(make_sample(100.0, 50.0))
+        panel._buffer.append(make_sample(101.0, 50.25))
+
+        panel._refresh_view()
+
+        xs, ys = panel._trajectory_curve.getData()
+        self.assertEqual(list(xs), [100.0, 101.0])
+        self.assertEqual(list(ys), [50.0, 50.25])
+
 
 if __name__ == "__main__":
     unittest.main()
