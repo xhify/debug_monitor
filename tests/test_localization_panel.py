@@ -80,6 +80,14 @@ class LocalizationPanelTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_default_map_fetch_config_uses_actual_laser_map_topic(self) -> None:
+        panel = LocalizationPanel()
+
+        fetcher = panel._current_map_fetch_client()
+
+        self.assertEqual(fetcher.config.map_topic, "/Laser_map")
+        self.assertEqual(fetcher.config.remote_map_path, "")
+
     def test_freeze_failure_does_not_toggle_button_or_fetch_map(self) -> None:
         fetcher = FakeMapFetchClient()
         panel = LocalizationPanel(

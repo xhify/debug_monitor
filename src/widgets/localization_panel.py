@@ -228,13 +228,17 @@ class LocalizationPanel(QWidget):
         self._mapping_host_edit = QLineEdit(DEFAULT_MAPPING_SSH_HOST)
         self._freeze_command_edit = QLineEdit(f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} false")
         self._resume_command_edit = QLineEdit(f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} true")
+        self._map_topic_edit = QLineEdit("/Laser_map")
+        self._remote_snapshot_path_edit = QLineEdit("")
         self._snapshot_command_edit = QLineEdit("")
-        self._remote_map_path_edit = QLineEdit("/tmp/frozen_fastlio_map.ply")
+        self._remote_map_path_edit = QLineEdit("")
         self._local_map_path_edit = QLineEdit("")
         for title, widget in (
             ("远程主机:", self._mapping_host_edit),
             ("冻结命令:", self._freeze_command_edit),
             ("恢复命令:", self._resume_command_edit),
+            ("地图 topic:", self._map_topic_edit),
+            ("远程快照 CSV:", self._remote_snapshot_path_edit),
             ("保存地图命令:", self._snapshot_command_edit),
             ("远程地图路径:", self._remote_map_path_edit),
             ("本地地图路径:", self._local_map_path_edit),
@@ -527,6 +531,8 @@ class LocalizationPanel(QWidget):
             self._map_fetch_client = MapFetchClient(
                 MapFetchConfig(
                     ssh_host=self._mapping_host_edit.text().strip() or DEFAULT_MAPPING_SSH_HOST,
+                    map_topic=self._map_topic_edit.text().strip(),
+                    remote_snapshot_path=self._remote_snapshot_path_edit.text().strip(),
                     remote_map_path=self._remote_map_path_edit.text().strip(),
                     snapshot_command=self._snapshot_command_edit.text().strip(),
                     local_map_path=self._local_map_path_edit.text().strip(),
