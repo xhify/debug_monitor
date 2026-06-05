@@ -34,6 +34,7 @@ class RosPanel(QWidget):
     disconnect_requested = Signal()
     cmd_vel_requested = Signal(float, float)
     pid_control_requested = Signal(float, bool, bool)
+    launch_manager_command_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -164,6 +165,19 @@ class RosPanel(QWidget):
         pid_button_row.addWidget(self._pid_stop_btn)
         pid_button_row.addStretch()
         pid_form.addRow(pid_button_row)
+
+        pid_launch_row = QHBoxLayout()
+        self._pid_launch_start_btn = QPushButton("启动 PID 节点")
+        self._pid_launch_start_btn.clicked.connect(self._on_pid_launch_start)
+        pid_launch_row.addWidget(self._pid_launch_start_btn)
+        self._pid_launch_stop_btn = QPushButton("停止 PID 节点")
+        self._pid_launch_stop_btn.clicked.connect(self._on_pid_launch_stop)
+        pid_launch_row.addWidget(self._pid_launch_stop_btn)
+        pid_launch_row.addStretch()
+        pid_form.addRow(pid_launch_row)
+
+        self._pid_launch_status_label = QLabel("")
+        pid_form.addRow("节点:", self._pid_launch_status_label)
         control_column.addWidget(pid_group)
         control_column.addStretch()
         self._speed_group = self._build_speed_monitor_group()
@@ -241,6 +255,8 @@ class RosPanel(QWidget):
         self._pid_forward_btn.setEnabled(connected)
         self._pid_backward_btn.setEnabled(connected)
         self._pid_stop_btn.setEnabled(connected)
+        self._pid_launch_start_btn.setEnabled(connected)
+        self._pid_launch_stop_btn.setEnabled(connected)
         self._status_label.setText("已连接" if connected else "未连接")
         self._status_label.setStyleSheet("color: green;" if connected else "color: red;")
 
@@ -313,6 +329,18 @@ class RosPanel(QWidget):
     def _on_pid_stop(self) -> None:
         self._set_target_speed_labels(0.0, 0.0)
         self.pid_control_requested.emit(0.0, False, False)
+
+    def _on_pid_launch_start(self) -> None:
+        self.launch_manager_command_requested.emit("start pid_control simple_follower pid_control.launch")
+        self.set_pid_launch_status("PID 节点启动命令已发送")
+
+    def _on_pid_launch_stop(self) -> None:
+        self.launch_manager_command_requested.emit("stop pid_control")
+        self.set_pid_launch_status("PID 节点停止命令已发送")
+
+    def set_pid_launch_status(self, text: str, *, error: bool = False) -> None:
+        self._pid_launch_status_label.setText(text)
+        self._pid_launch_status_label.setStyleSheet("color: red;" if error else "color: green;")
 
     def _set_target_speed_labels(self, left: float, right: float) -> None:
         self._target_left_speed = left

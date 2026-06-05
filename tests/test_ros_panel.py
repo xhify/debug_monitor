@@ -67,6 +67,23 @@ class RosPanelTests(unittest.TestCase):
         self.assertEqual(commands[1], (0.2, False, True))
         self.assertEqual(commands[2], (0.0, False, False))
 
+    def test_pid_launch_buttons_emit_launch_manager_commands(self) -> None:
+        panel = RosPanel()
+        commands: list[str] = []
+        panel.launch_manager_command_requested.connect(commands.append)
+        panel.set_connected(True)
+
+        panel._pid_launch_start_btn.click()
+        panel._pid_launch_stop_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "start pid_control simple_follower pid_control.launch",
+                "stop pid_control",
+            ],
+        )
+
     def test_update_snapshot_refreshes_ros_values(self) -> None:
         panel = RosPanel()
 

@@ -95,6 +95,24 @@ class LocalizationPanelTests(unittest.TestCase):
 
         self.assertEqual(view_box.state["aspectLocked"], 1.0)
 
+    def test_lidar_launch_buttons_publish_launch_manager_commands(self) -> None:
+        panel = LocalizationPanel()
+        commands: list[str] = []
+        panel._worker.publish_launch_manager_command = commands.append
+
+        panel._set_connected(True)
+        panel._lidar_launch_start_btn.click()
+        panel._lidar_launch_stop_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "start lidar turn_on_wheeltec_robot wheeltec_lidar.launch",
+                "stop lidar",
+            ],
+        )
+        self.assertIn("雷达", panel._lidar_launch_label.text())
+
     def test_freeze_failure_does_not_toggle_button_or_fetch_map(self) -> None:
         fetcher = FakeMapFetchClient()
         panel = LocalizationPanel(

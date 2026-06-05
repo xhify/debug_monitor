@@ -30,6 +30,7 @@ class FakeTopic:
         self.name = name
         self.message_type = message_type
         self.callback = None
+        self.published = []
         self.unsubscribed = False
         FakeTopic.created.append(self)
 
@@ -38,6 +39,9 @@ class FakeTopic:
 
     def unsubscribe(self) -> None:
         self.unsubscribed = True
+
+    def publish(self, message) -> None:
+        self.published.append(dict(message))
 
 
 class RosOdometrySessionTests(unittest.TestCase):
@@ -59,7 +63,24 @@ class RosOdometrySessionTests(unittest.TestCase):
         self.assertEqual(session.ros.host, "192.168.0.14")
         self.assertEqual([(topic.name, topic.message_type) for topic in FakeTopic.created], [
             ("/Odometry", "nav_msgs/Odometry"),
+            ("/launch_manager/command", "std_msgs/String"),
         ])
+
+    def test_publish_launch_manager_command_sends_std_msgs_string(self) -> None:
+        session = RosOdometrySession(
+            "localhost",
+            9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.publish_launch_manager_command("start fastlio fast_lio mapping_c16.launch")
+
+        self.assertEqual(
+            session.launch_command_topic.published[-1],
+            {"data": "start fastlio fast_lio mapping_c16.launch"},
+        )
 
     def test_odometry_callback_extracts_pose_frames_and_yaw(self) -> None:
         received = []

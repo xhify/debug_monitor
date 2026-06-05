@@ -222,6 +222,7 @@ class MainWindow(QMainWindow):
         self._ros_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
         self._ros_panel.cmd_vel_requested.connect(self._ros_worker.publish_cmd_vel)
         self._ros_panel.pid_control_requested.connect(self._ros_worker.publish_line_follow_control)
+        self._ros_panel.launch_manager_command_requested.connect(self._publish_launch_manager_command)
         self._ros_imu_panel.connect_requested.connect(self._ros_worker.open_bridge)
         self._ros_imu_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
         self._summary_page = self._build_summary_page()
@@ -753,6 +754,10 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, msg: str) -> None:
         self._status_label.setText(f"错误: {msg}")
+
+    def _publish_launch_manager_command(self, command: str) -> None:
+        self._ros_worker.publish_launch_manager_command(command)
+        self._status_label.setText(f"launch_manager 命令已发送: {command}")
 
     def _on_ros_connection_changed(self, connected: bool) -> None:
         self._ros_connected = connected

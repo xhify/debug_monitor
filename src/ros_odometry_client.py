@@ -33,6 +33,7 @@ class RosOdometrySession:
         self._on_sample = on_sample
         self.ros: Any | None = None
         self.topic: Any | None = None
+        self.launch_command_topic: Any | None = None
         self.connected = False
         self._lock = threading.Lock()
         self._frame_count = 0
@@ -55,6 +56,7 @@ class RosOdometrySession:
         self.ros.run()
         self.topic = self._topic_factory(self.ros, self.topic_name, "nav_msgs/Odometry")
         self.topic.subscribe(self._on_message)
+        self.launch_command_topic = self._topic_factory(self.ros, "/launch_manager/command", "std_msgs/String")
         self.connected = True
 
     def disconnect(self) -> None:
@@ -63,8 +65,14 @@ class RosOdometrySession:
         if self.ros is not None:
             self.ros.close()
         self.topic = None
+        self.launch_command_topic = None
         self.ros = None
         self.connected = False
+
+    def publish_launch_manager_command(self, command: str) -> None:
+        if not self.connected or self.launch_command_topic is None:
+            raise RuntimeError("rosbridge is not connected")
+        self.launch_command_topic.publish({"data": str(command)})
 
     def _load_default_factories(self) -> None:
         if self._ros_factory is not None and self._topic_factory is not None:
@@ -126,6 +134,15 @@ class RosOdometryWorker(QThread):
         self._running = False
         self.wait(2000)
         self.connection_changed.emit(False)
+
+    def publish_launch_manager_command(self, command: str) -> None:
+        try:
+            if self._session is None:
+                raise RuntimeError("rosbridge is not connected")
+            self._session.publish_launch_manager_command(command)
+        except Exception as exc:
+            self._error_count += 1
+            self.error_occurred.emit(f"launch_manager 命令发送失败: {exc}")
 
     def run(self) -> None:
         try:

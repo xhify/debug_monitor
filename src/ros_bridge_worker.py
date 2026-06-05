@@ -95,6 +95,7 @@ class RosBridgeSession:
     )
     CMD_VEL_TOPIC = ("/cmd_vel", "geometry_msgs/Twist")
     LINE_FOLLOW_CONTROL_TOPIC = ("/line_follow_control", "simple_follower/LineFollowControl")
+    LAUNCH_MANAGER_COMMAND_TOPIC = ("/launch_manager/command", "std_msgs/String")
 
     def __init__(
         self,
@@ -134,6 +135,8 @@ class RosBridgeSession:
         self._topics[cmd_name] = self._topic_factory(self.ros, cmd_name, cmd_type)
         control_name, control_type = self.LINE_FOLLOW_CONTROL_TOPIC
         self._topics[control_name] = self._topic_factory(self.ros, control_name, control_type)
+        launch_name, launch_type = self.LAUNCH_MANAGER_COMMAND_TOPIC
+        self._topics[launch_name] = self._topic_factory(self.ros, launch_name, launch_type)
         self.connected = True
 
     def disconnect(self) -> None:
@@ -174,6 +177,12 @@ class RosBridgeSession:
         }
         topic = self.topic("/line_follow_control")
         topic.publish(self._message_factory(message))
+
+    def publish_launch_manager_command(self, command: str) -> None:
+        if not self.connected:
+            raise RuntimeError("rosbridge is not connected")
+        topic = self.topic("/launch_manager/command")
+        topic.publish(self._message_factory({"data": str(command)}))
 
     def snapshot(self) -> RosSnapshot:
         with self._lock:
@@ -338,6 +347,15 @@ class RosBridgeWorker(QThread):
         except Exception as exc:
             self._error_count += 1
             self.error_occurred.emit(f"ROS PID 控制发送失败: {exc}")
+
+    def publish_launch_manager_command(self, command: str) -> None:
+        try:
+            if self._session is None:
+                raise RuntimeError("rosbridge is not connected")
+            self._session.publish_launch_manager_command(command)
+        except Exception as exc:
+            self._error_count += 1
+            self.error_occurred.emit(f"ROS launch 管理命令发送失败: {exc}")
 
     def latest_snapshot(self) -> RosSnapshot | None:
         if self._session is None:

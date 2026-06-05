@@ -228,6 +228,40 @@ class MainWindowReplayTests(unittest.TestCase):
 
         self.assertEqual(commands, [(0.2, True, False)])
 
+    def test_ros_panel_pid_launch_buttons_publish_launch_manager_commands(self) -> None:
+        window = MainWindow()
+        commands: list[str] = []
+        window._ros_worker.publish_launch_manager_command = commands.append
+        window._ros_panel.set_connected(True)
+
+        window._ros_panel._pid_launch_start_btn.click()
+        window._ros_panel._pid_launch_stop_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "start pid_control simple_follower pid_control.launch",
+                "stop pid_control",
+            ],
+        )
+
+    def test_localization_panel_fastlio_launch_buttons_publish_launch_manager_commands(self) -> None:
+        window = MainWindow()
+        commands: list[str] = []
+        window._localization_panel._worker.publish_launch_manager_command = commands.append
+        window._localization_panel._set_connected(True)
+
+        window._localization_panel._fastlio_launch_start_btn.click()
+        window._localization_panel._fastlio_launch_stop_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "start fastlio fast_lio mapping_c16.launch",
+                "stop fastlio",
+            ],
+        )
+
     def test_summary_recording_writes_encoder_and_imu_files_to_one_directory(self) -> None:
         window = MainWindow()
         with temp_dir() as tmp:

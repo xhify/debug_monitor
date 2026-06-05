@@ -225,6 +225,30 @@ class LocalizationPanel(QWidget):
         row3.addWidget(self._save_map_trajectory_btn)
         layout.addLayout(row3)
 
+        row4 = QHBoxLayout()
+        self._fastlio_launch_start_btn = QPushButton("启动 FAST-LIO")
+        self._fastlio_launch_start_btn.clicked.connect(self._start_fastlio_launch)
+        row4.addWidget(self._fastlio_launch_start_btn)
+        self._fastlio_launch_stop_btn = QPushButton("停止 FAST-LIO")
+        self._fastlio_launch_stop_btn.clicked.connect(self._stop_fastlio_launch)
+        row4.addWidget(self._fastlio_launch_stop_btn)
+        layout.addLayout(row4)
+
+        self._fastlio_launch_label = QLabel("")
+        layout.addWidget(self._fastlio_launch_label)
+
+        row5 = QHBoxLayout()
+        self._lidar_launch_start_btn = QPushButton("启动雷达节点")
+        self._lidar_launch_start_btn.clicked.connect(self._start_lidar_launch)
+        row5.addWidget(self._lidar_launch_start_btn)
+        self._lidar_launch_stop_btn = QPushButton("停止雷达节点")
+        self._lidar_launch_stop_btn.clicked.connect(self._stop_lidar_launch)
+        row5.addWidget(self._lidar_launch_stop_btn)
+        layout.addLayout(row5)
+
+        self._lidar_launch_label = QLabel("")
+        layout.addWidget(self._lidar_launch_label)
+
         config_form = QFormLayout()
         self._mapping_host_edit = QLineEdit(DEFAULT_MAPPING_SSH_HOST)
         self._freeze_command_edit = QLineEdit(f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} false")
@@ -331,6 +355,10 @@ class LocalizationPanel(QWidget):
         self._host_edit.setEnabled(not connected)
         self._port_spin.setEnabled(not connected)
         self._topic_edit.setEnabled(not connected)
+        self._fastlio_launch_start_btn.setEnabled(connected)
+        self._fastlio_launch_stop_btn.setEnabled(connected)
+        self._lidar_launch_start_btn.setEnabled(connected)
+        self._lidar_launch_stop_btn.setEnabled(connected)
         self._connection_label.setText("已连接" if connected else "未连接")
         self._connection_label.setStyleSheet("color: green;" if connected else "color: red;")
 
@@ -342,6 +370,30 @@ class LocalizationPanel(QWidget):
     def _on_error(self, message: str) -> None:
         self._connection_label.setText(message)
         self._connection_label.setStyleSheet("color: red;")
+
+    def _start_fastlio_launch(self) -> None:
+        self._worker.publish_launch_manager_command("start fastlio fast_lio mapping_c16.launch")
+        self.set_fastlio_launch_status("FAST-LIO 启动命令已发送")
+
+    def _stop_fastlio_launch(self) -> None:
+        self._worker.publish_launch_manager_command("stop fastlio")
+        self.set_fastlio_launch_status("FAST-LIO 停止命令已发送")
+
+    def set_fastlio_launch_status(self, text: str, *, error: bool = False) -> None:
+        self._fastlio_launch_label.setText(text)
+        self._fastlio_launch_label.setStyleSheet("color: red;" if error else "color: green;")
+
+    def _start_lidar_launch(self) -> None:
+        self._worker.publish_launch_manager_command("start lidar turn_on_wheeltec_robot wheeltec_lidar.launch")
+        self.set_lidar_launch_status("雷达节点启动命令已发送")
+
+    def _stop_lidar_launch(self) -> None:
+        self._worker.publish_launch_manager_command("stop lidar")
+        self.set_lidar_launch_status("雷达节点停止命令已发送")
+
+    def set_lidar_launch_status(self, text: str, *, error: bool = False) -> None:
+        self._lidar_launch_label.setText(text)
+        self._lidar_launch_label.setStyleSheet("color: red;" if error else "color: green;")
 
     def _refresh_view(self) -> None:
         latest = self._buffer.latest()

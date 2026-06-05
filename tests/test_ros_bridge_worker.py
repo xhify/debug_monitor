@@ -81,6 +81,7 @@ class RosBridgeSessionTests(unittest.TestCase):
                 ("/PowerVoltage", "std_msgs/Float32"),
                 ("/cmd_vel", "geometry_msgs/Twist"),
                 ("/line_follow_control", "simple_follower/LineFollowControl"),
+                ("/launch_manager/command", "std_msgs/String"),
             ],
         )
 
@@ -202,6 +203,22 @@ class RosBridgeSessionTests(unittest.TestCase):
                 "forward": False,
                 "backward": False,
             },
+        )
+
+    def test_publish_launch_manager_command_sends_std_msgs_string(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.publish_launch_manager_command("start fastlio fast_lio mapping_c16.launch")
+
+        self.assertEqual(
+            session.topic("/launch_manager/command").published[-1],
+            {"data": "start fastlio fast_lio mapping_c16.launch"},
         )
 
     def test_disconnect_unsubscribes_topics_and_closes_ros_without_terminating_reactor(self) -> None:
