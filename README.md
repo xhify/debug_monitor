@@ -80,6 +80,8 @@ python src/main.py
 
 FAST-LIO 定位面板的启动/停止节点、冻结/恢复建图、冻结地图快照均通过 ROSbridge 工作，不再需要 SSH 到固定主机或固定 IP。ROS 主机需要启动 `rosbridge_server`，并启动 `rosapi`，以便客户端可以设置 `/mapping/map_update_enable` 并订阅 `/Laser_map`。
 
+汇总记录中的 ROS CSV 会保留本地相对 `time_s`，同时追加保存各 topic 的 `header.stamp` 为 `ros_time`，可用于和 FAST-LIO `/Odometry` 轨迹按 ROS 时间戳对齐。
+
 可通过环境变量覆盖无输入框场景下的默认 ROSbridge 配置：
 
 ```bash

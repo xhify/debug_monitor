@@ -141,6 +141,97 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertEqual(snapshot.active_imu.frame_count, 1)
         self.assertAlmostEqual(snapshot.voltage, 25.8)
 
+    def test_odom_callback_preserves_ros_header_stamp_and_frame(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.topic("/odom").callback(
+            {
+                "header": {
+                    "stamp": {"secs": 100, "nsecs": 250000000},
+                    "frame_id": "odom",
+                },
+                "twist": {"twist": {"linear": {"x": 0.1}, "angular": {"z": 0.2}}},
+                "pose": {"pose": {"position": {"x": 1.0}, "orientation": {"w": 1.0}}},
+            }
+        )
+
+        snapshot = session.snapshot()
+        self.assertAlmostEqual(snapshot.odom_ros_time, 100.25)
+        self.assertEqual(snapshot.odom_frame_id, "odom")
+        self.assertGreater(snapshot.odom_recv_time, 0.0)
+
+    def test_imu_callbacks_preserve_each_topic_ros_header_stamp_and_frame(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.topic("/imu").callback(
+            {
+                "header": {
+                    "stamp": {"secs": 10, "nsecs": 500000000},
+                    "frame_id": "imu_link",
+                },
+                "linear_acceleration": {"z": 9.8},
+                "angular_velocity": {"z": 0.03},
+                "orientation": {"w": 1.0},
+            }
+        )
+        session.topic("/active_imu").callback(
+            {
+                "header": {
+                    "stamp": {"sec": 11, "nanosec": 750000000},
+                    "frame_id": "active_imu_link",
+                },
+                "linear_acceleration": {"z": -9.8},
+                "angular_velocity": {"z": -0.03},
+                "orientation": {"w": 1.0},
+            }
+        )
+
+        snapshot = session.snapshot()
+        self.assertAlmostEqual(snapshot.imu_ros_time, 10.5)
+        self.assertEqual(snapshot.imu_frame_id, "imu_link")
+        self.assertGreater(snapshot.imu_recv_time, 0.0)
+        self.assertAlmostEqual(snapshot.imu.ros_time, 10.5)
+        self.assertEqual(snapshot.imu.frame_id, "imu_link")
+        self.assertGreater(snapshot.imu.recv_time, 0.0)
+        self.assertAlmostEqual(snapshot.active_imu_ros_time, 11.75)
+        self.assertEqual(snapshot.active_imu_frame_id, "active_imu_link")
+        self.assertGreater(snapshot.active_imu_recv_time, 0.0)
+        self.assertAlmostEqual(snapshot.active_imu.ros_time, 11.75)
+        self.assertEqual(snapshot.active_imu.frame_id, "active_imu_link")
+        self.assertGreater(snapshot.active_imu.recv_time, 0.0)
+
+    def test_missing_header_stamp_defaults_ros_time_to_zero(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.topic("/odom").callback({})
+        session.topic("/imu").callback({"orientation": {"w": 1.0}})
+
+        snapshot = session.snapshot()
+        self.assertEqual(snapshot.odom_ros_time, 0.0)
+        self.assertEqual(snapshot.odom_frame_id, "")
+        self.assertGreater(snapshot.odom_recv_time, 0.0)
+        self.assertEqual(snapshot.imu_ros_time, 0.0)
+        self.assertEqual(snapshot.imu_frame_id, "")
+        self.assertGreater(snapshot.imu_recv_time, 0.0)
+
     def test_publish_cmd_vel_sends_twist_message(self) -> None:
         session = RosBridgeSession(
             host="192.168.0.14",

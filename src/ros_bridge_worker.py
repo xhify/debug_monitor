@@ -31,6 +31,9 @@ class RosImuReading:
     roll_deg: float = 0.0
     pitch_deg: float = 0.0
     yaw_deg: float = 0.0
+    ros_time: float = 0.0
+    frame_id: str = ""
+    recv_time: float = 0.0
 
     def clone(self) -> "RosImuReading":
         return RosImuReading(**{field_.name: getattr(self, field_.name) for field_ in fields(RosImuReading)})
@@ -59,6 +62,15 @@ class RosSnapshot:
     gyro_z: float = 0.0
     voltage: float = 0.0
     last_topic: str = ""
+    odom_ros_time: float = 0.0
+    odom_frame_id: str = ""
+    odom_recv_time: float = 0.0
+    imu_ros_time: float = 0.0
+    imu_frame_id: str = ""
+    imu_recv_time: float = 0.0
+    active_imu_ros_time: float = 0.0
+    active_imu_frame_id: str = ""
+    active_imu_recv_time: float = 0.0
     imu: RosImuReading = field(default_factory=RosImuReading)
     active_imu: RosImuReading = field(default_factory=RosImuReading)
 
@@ -224,6 +236,8 @@ class RosBridgeSession:
             self._on_snapshot(snapshot)
 
     def _on_odom(self, message: dict) -> None:
+        recv_time = time.time()
+        header = message.get("header", {})
         twist = message.get("twist", {}).get("twist", {})
         linear = twist.get("linear", {})
         angular = twist.get("angular", {})
@@ -241,11 +255,16 @@ class RosBridgeSession:
             self._snapshot.orientation_y = float(orientation.get("y", 0.0))
             self._snapshot.orientation_z = float(orientation.get("z", 0.0))
             self._snapshot.orientation_w = float(orientation.get("w", 1.0))
+            self._snapshot.odom_ros_time = _stamp_to_seconds(header)
+            self._snapshot.odom_frame_id = str(header.get("frame_id", ""))
+            self._snapshot.odom_recv_time = recv_time
             self._snapshot.last_topic = "/odom"
             self._snapshot.frame_count += 1
         self._publish_snapshot()
 
     def _on_imu(self, topic_name: str, message: dict) -> None:
+        recv_time = time.time()
+        header = message.get("header", {})
         accel = message.get("linear_acceleration", {})
         gyro = message.get("angular_velocity", {})
         orientation = message.get("orientation", {})
@@ -274,6 +293,9 @@ class RosBridgeSession:
             reading.roll_deg = roll_deg
             reading.pitch_deg = pitch_deg
             reading.yaw_deg = yaw_deg
+            reading.ros_time = _stamp_to_seconds(header)
+            reading.frame_id = str(header.get("frame_id", ""))
+            reading.recv_time = recv_time
             reading.frame_count += 1
             if topic_name == "/imu":
                 self._snapshot.accel_x = reading.accel_x
@@ -282,6 +304,13 @@ class RosBridgeSession:
                 self._snapshot.gyro_x = reading.gyro_x
                 self._snapshot.gyro_y = reading.gyro_y
                 self._snapshot.gyro_z = reading.gyro_z
+                self._snapshot.imu_ros_time = reading.ros_time
+                self._snapshot.imu_frame_id = reading.frame_id
+                self._snapshot.imu_recv_time = reading.recv_time
+            else:
+                self._snapshot.active_imu_ros_time = reading.ros_time
+                self._snapshot.active_imu_frame_id = reading.frame_id
+                self._snapshot.active_imu_recv_time = reading.recv_time
             self._snapshot.last_topic = topic_name
             self._snapshot.frame_count += 1
         self._publish_snapshot()
@@ -408,3 +437,15 @@ def quaternion_to_euler_degrees(x: float, y: float, z: float, w: float) -> tuple
     yaw = atan2(siny_cosp, cosy_cosp)
 
     return degrees(roll), degrees(pitch), degrees(yaw)
+
+
+def _stamp_to_seconds(header: dict) -> float:
+    stamp = header.get("stamp", {}) if isinstance(header, dict) else {}
+    if not isinstance(stamp, dict):
+        return 0.0
+    secs = stamp.get("secs", stamp.get("sec", 0))
+    nsecs = stamp.get("nsecs", stamp.get("nanosec", 0))
+    try:
+        return float(secs) + float(nsecs) / 1_000_000_000.0
+    except (TypeError, ValueError):
+        return 0.0

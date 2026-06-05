@@ -50,6 +50,11 @@ def make_snapshot(index: int) -> RosSnapshot:
     )
 
 
+OLD_ROS_SUMMARY_ODOM_HEADER = ROS_SUMMARY_ODOM_HEADER[:12]
+OLD_ROS_IMU_RAW_HEADER = ROS_IMU_RAW_HEADER[:15]
+OLD_ROS_IMU_ALIGNED_HEADER = ROS_IMU_ALIGNED_HEADER[:33]
+
+
 class RosTimeSeriesBufferTests(unittest.TestCase):
     def test_append_returns_chronological_plot_series(self) -> None:
         buffer = RosTimeSeriesBuffer(capacity=2)
@@ -117,6 +122,9 @@ class RosSummaryRecordingSessionTests(unittest.TestCase):
                         orientation_z=0.1,
                         orientation_w=0.99,
                         last_topic="/odom",
+                        odom_ros_time=100.25,
+                        odom_recv_time=200.5,
+                        odom_frame_id="odom",
                     )
                 )
                 session.write_snapshot(
@@ -136,7 +144,13 @@ class RosSummaryRecordingSessionTests(unittest.TestCase):
                             orientation_z=0.70710678,
                             orientation_w=0.70710678,
                             yaw_deg=90.0,
+                            ros_time=101.25,
+                            recv_time=201.5,
+                            frame_id="imu_link",
                         ),
+                        imu_ros_time=101.25,
+                        imu_recv_time=201.5,
+                        imu_frame_id="imu_link",
                     )
                 )
                 session.write_snapshot(
@@ -156,7 +170,13 @@ class RosSummaryRecordingSessionTests(unittest.TestCase):
                             orientation_z=0.0,
                             orientation_w=0.70710678,
                             pitch_deg=90.0,
+                            ros_time=102.75,
+                            recv_time=202.5,
+                            frame_id="active_imu_link",
                         ),
+                        active_imu_ros_time=102.75,
+                        active_imu_recv_time=202.5,
+                        active_imu_frame_id="active_imu_link",
                     )
                 )
             session.finalize()
@@ -171,27 +191,52 @@ class RosSummaryRecordingSessionTests(unittest.TestCase):
                 merged_rows = list(csv.reader(fh))
 
             self.assertEqual(odom_rows[0], ROS_SUMMARY_ODOM_HEADER)
+            self.assertEqual(odom_rows[0][:len(OLD_ROS_SUMMARY_ODOM_HEADER)], OLD_ROS_SUMMARY_ODOM_HEADER)
+            self.assertEqual(odom_rows[0][-3:], ["ros_time", "recv_time", "frame_id"])
             self.assertEqual(odom_rows[0][2:4], ["motor_a_left_speed", "motor_b_right_speed"])
             self.assertEqual(odom_rows[1][1], "3")
             self.assertEqual(odom_rows[1][2], "0.42")
             self.assertEqual(odom_rows[1][5], "1.0")
+            self.assertEqual(odom_rows[1][-3:], ["100.25", "200.5", "odom"])
             self.assertEqual(imu_rows[0], ROS_IMU_RAW_HEADER)
+            self.assertEqual(imu_rows[0][:len(OLD_ROS_IMU_RAW_HEADER)], OLD_ROS_IMU_RAW_HEADER)
+            self.assertEqual(imu_rows[0][-3:], ["ros_time", "recv_time", "frame_id"])
             self.assertEqual(len(imu_rows), 2)
             self.assertEqual(imu_rows[1][1], "1")
             self.assertEqual(imu_rows[1][4], "9.7")
-            self.assertEqual(imu_rows[1][-1], "90.0")
+            self.assertEqual(imu_rows[1][14], "90.0")
+            self.assertEqual(imu_rows[1][-3:], ["101.25", "201.5", "imu_link"])
             self.assertEqual(active_rows[0], ROS_IMU_RAW_HEADER)
             self.assertEqual(len(active_rows), 2)
             self.assertEqual(active_rows[1][1], "2")
             self.assertEqual(active_rows[1][4], "-9.8")
-            self.assertEqual(active_rows[1][-2], "90.0")
+            self.assertEqual(active_rows[1][13], "90.0")
+            self.assertEqual(active_rows[1][-3:], ["102.75", "202.5", "active_imu_link"])
             self.assertEqual(merged_rows[0], ROS_IMU_ALIGNED_HEADER)
+            self.assertEqual(merged_rows[0][:len(OLD_ROS_IMU_ALIGNED_HEADER)], OLD_ROS_IMU_ALIGNED_HEADER)
+            self.assertEqual(
+                merged_rows[0][-6:],
+                [
+                    "imu_ros_time",
+                    "imu_recv_time",
+                    "imu_frame_id",
+                    "active_imu_ros_time",
+                    "active_imu_recv_time",
+                    "active_imu_frame_id",
+                ],
+            )
             self.assertEqual(len(merged_rows), 2)
             self.assertEqual(merged_rows[1][0], "0")
             self.assertEqual(merged_rows[1][2], "5.000")
             self.assertEqual(merged_rows[1][4], "1")
+            self.assertEqual(merged_rows[1][3], "0.010000")
+            self.assertEqual(merged_rows[1][18], "0.015000")
             active_start = merged_rows[0].index("active_imu_frame_count")
             self.assertEqual(merged_rows[1][active_start], "2")
+            self.assertEqual(
+                merged_rows[1][-6:],
+                ["101.25", "201.5", "imu_link", "102.75", "202.5", "active_imu_link"],
+            )
             self.assertEqual(session.rows_written_by_stream, {"odom": 1, "imu": 2})
 
     def test_ros_imu_summary_aligns_nearby_topic_updates_without_repeating_previous_side(self) -> None:
@@ -280,6 +325,7 @@ class RosSummaryRecordingSessionTests(unittest.TestCase):
             self.assertEqual(imu_rows[0], ROS_IMU_RAW_HEADER)
             self.assertEqual(imu_rows[1][1], "1")
             self.assertEqual(imu_rows[1][4], "9.8")
+            self.assertEqual(imu_rows[1][-3:], ["0.0", "0.0", ""])
             self.assertEqual(active_rows, [ROS_IMU_RAW_HEADER])
             self.assertEqual(merged_rows, [ROS_IMU_ALIGNED_HEADER])
             self.assertEqual(session.rows_written_by_stream, {"odom": 0, "imu": 1})

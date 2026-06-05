@@ -69,6 +69,9 @@ ROS_SUMMARY_ODOM_HEADER = [
     "orientation_y",
     "orientation_z",
     "orientation_w",
+    "ros_time",
+    "recv_time",
+    "frame_id",
 ]
 
 ROS_IMU_RAW_HEADER = [
@@ -87,6 +90,9 @@ ROS_IMU_RAW_HEADER = [
     "roll_deg",
     "pitch_deg",
     "yaw_deg",
+    "ros_time",
+    "recv_time",
+    "frame_id",
 ]
 
 ROS_IMU_ALIGNED_HEADER = [
@@ -123,6 +129,12 @@ ROS_IMU_ALIGNED_HEADER = [
     "active_imu_roll_deg",
     "active_imu_pitch_deg",
     "active_imu_yaw_deg",
+    "imu_ros_time",
+    "imu_recv_time",
+    "imu_frame_id",
+    "active_imu_ros_time",
+    "active_imu_recv_time",
+    "active_imu_frame_id",
 ]
 
 ROS_SUMMARY_IMU_HEADER = ROS_IMU_ALIGNED_HEADER
@@ -382,6 +394,9 @@ class RosSummaryRecordingSession:
             snapshot.orientation_y,
             snapshot.orientation_z,
             snapshot.orientation_w,
+            snapshot.odom_ros_time,
+            snapshot.odom_recv_time,
+            snapshot.odom_frame_id,
         ])
         self.rows_written_by_stream["odom"] += 1
         self._flush()
@@ -398,6 +413,7 @@ class RosSummaryRecordingSession:
         writer.writerow([
             f"{time_s:.3f}",
             *self._imu_reading_values(reading),
+            *self._imu_reading_metadata(reading),
         ])
         handle.flush()
         self.rows_written_by_stream["imu"] += 1
@@ -437,6 +453,18 @@ class RosSummaryRecordingSession:
             reading.roll_deg,
             reading.pitch_deg,
             reading.yaw_deg,
+        ]
+
+    @staticmethod
+    def _imu_reading_metadata(reading) -> list[object]:
+        if reading is None:
+            return ["", "", ""]
+        if reading.frame_count <= 0:
+            return ["", "", ""]
+        return [
+            reading.ros_time,
+            reading.recv_time,
+            reading.frame_id,
         ]
 
     def _flush(self) -> None:
@@ -502,4 +530,6 @@ def _ros_imu_aligned_row(
         *RosSummaryRecordingSession._imu_reading_values(imu_reading),
         f"{active_time:.6f}",
         *RosSummaryRecordingSession._imu_reading_values(active_reading),
+        *RosSummaryRecordingSession._imu_reading_metadata(imu_reading),
+        *RosSummaryRecordingSession._imu_reading_metadata(active_reading),
     ]
