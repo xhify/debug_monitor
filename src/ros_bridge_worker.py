@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QThread, Signal
 
+from app_config import DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
+
 
 @dataclass(slots=True)
 class RosImuReading:
@@ -303,8 +305,8 @@ class RosBridgeWorker(QThread):
         super().__init__(parent)
         self._session: RosBridgeSession | None = None
         self._running = False
-        self._host = "192.168.0.14"
-        self._port = 9090
+        self._host = DEFAULT_ROSBRIDGE_HOST
+        self._port = DEFAULT_ROSBRIDGE_PORT
         self._error_count = 0
 
     @property
@@ -317,7 +319,7 @@ class RosBridgeWorker(QThread):
             return 0
         return self._session.snapshot().frame_count
 
-    def open_bridge(self, host: str, port: int = 9090) -> None:
+    def open_bridge(self, host: str, port: int = DEFAULT_ROSBRIDGE_PORT) -> None:
         if self.isRunning():
             return
         self._host = host

@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QThread, Signal
 
+from app_config import DEFAULT_FASTLIO_ODOM_TOPIC, DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
 from localization_buffer import LocalizationSample
 
 
@@ -20,7 +21,7 @@ class RosOdometrySession:
         host: str,
         port: int,
         *,
-        topic: str = "/Odometry",
+        topic: str = DEFAULT_FASTLIO_ODOM_TOPIC,
         ros_factory: Callable[[str, int], Any] | None = None,
         topic_factory: Callable[[Any, str, str], Any] | None = None,
         on_sample: Callable[[LocalizationSample], None] | None = None,
@@ -104,9 +105,9 @@ class RosOdometryWorker(QThread):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._host = "192.168.0.14"
-        self._port = 9090
-        self._topic = "/Odometry"
+        self._host = DEFAULT_ROSBRIDGE_HOST
+        self._port = DEFAULT_ROSBRIDGE_PORT
+        self._topic = DEFAULT_FASTLIO_ODOM_TOPIC
         self._running = False
         self._session: RosOdometrySession | None = None
         self._error_count = 0
@@ -121,7 +122,12 @@ class RosOdometryWorker(QThread):
             return 0
         return self._session.frame_count
 
-    def open_bridge(self, host: str, port: int = 9090, topic: str = "/Odometry") -> None:
+    def open_bridge(
+        self,
+        host: str,
+        port: int = DEFAULT_ROSBRIDGE_PORT,
+        topic: str = DEFAULT_FASTLIO_ODOM_TOPIC,
+    ) -> None:
         if self.isRunning():
             return
         self._host = host

@@ -76,6 +76,20 @@ uv pip install -r requirements.txt
 python src/main.py
 ```
 
+### ROSbridge 建图与定位
+
+FAST-LIO 定位面板的启动/停止节点、冻结/恢复建图、冻结地图快照均通过 ROSbridge 工作，不再需要 SSH 到固定主机或固定 IP。ROS 主机需要启动 `rosbridge_server`，并启动 `rosapi`，以便客户端可以设置 `/mapping/map_update_enable` 并订阅 `/Laser_map`。
+
+可通过环境变量覆盖无输入框场景下的默认 ROSbridge 配置：
+
+```bash
+DEBUG_MONITOR_ROSBRIDGE_HOST=192.168.0.14
+DEBUG_MONITOR_ROSBRIDGE_PORT=9090
+DEBUG_MONITOR_FASTLIO_ODOM_TOPIC=/Odometry
+DEBUG_MONITOR_MAP_TOPIC=/Laser_map
+DEBUG_MONITOR_MAP_UPDATE_PARAM=/mapping/map_update_enable
+```
+
 ## 3. 硬件连接
 
 1. 使用 USB 转 TTL 模块连接机器人调试串口（UART1）

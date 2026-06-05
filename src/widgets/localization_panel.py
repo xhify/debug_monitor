@@ -32,11 +32,10 @@ from localization_fusion import (
 )
 from map_fetch_client import MapFetchClient, MapFetchConfig
 from mapping_update_client import (
-    DEFAULT_MAPPING_SSH_HOST,
-    MAP_UPDATE_PARAM,
+    MappingUpdateConfig,
     MappingUpdateClient,
-    ROS_SETUP_COMMAND,
 )
+from app_config import DEFAULT_MAP_TOPIC, DEFAULT_MAP_UPDATE_PARAM
 from ros_odometry_client import RosOdometryWorker
 
 
@@ -250,22 +249,12 @@ class LocalizationPanel(QWidget):
         layout.addWidget(self._lidar_launch_label)
 
         config_form = QFormLayout()
-        self._mapping_host_edit = QLineEdit(DEFAULT_MAPPING_SSH_HOST)
-        self._freeze_command_edit = QLineEdit(f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} false")
-        self._resume_command_edit = QLineEdit(f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} true")
-        self._map_topic_edit = QLineEdit("/Laser_map")
-        self._remote_snapshot_path_edit = QLineEdit("")
-        self._snapshot_command_edit = QLineEdit("")
-        self._remote_map_path_edit = QLineEdit("")
+        self._map_update_param_edit = QLineEdit(DEFAULT_MAP_UPDATE_PARAM)
+        self._map_topic_edit = QLineEdit(DEFAULT_MAP_TOPIC)
         self._local_map_path_edit = QLineEdit("")
         for title, widget in (
-            ("远程主机:", self._mapping_host_edit),
-            ("冻结命令:", self._freeze_command_edit),
-            ("恢复命令:", self._resume_command_edit),
+            ("建图参数:", self._map_update_param_edit),
             ("地图 topic:", self._map_topic_edit),
-            ("远程快照 CSV:", self._remote_snapshot_path_edit),
-            ("保存地图命令:", self._snapshot_command_edit),
-            ("远程地图路径:", self._remote_map_path_edit),
             ("本地地图路径:", self._local_map_path_edit),
         ):
             config_form.addRow(title, widget)
@@ -579,9 +568,11 @@ class LocalizationPanel(QWidget):
     def _current_mapping_update_client(self) -> MappingUpdateClient:
         if self._mapping_update_client is None or self._owns_mapping_client:
             self._mapping_update_client = MappingUpdateClient(
-                ssh_host=self._mapping_host_edit.text().strip() or DEFAULT_MAPPING_SSH_HOST,
-                freeze_command=self._freeze_command_edit.text().strip() or None,
-                resume_command=self._resume_command_edit.text().strip() or None,
+                MappingUpdateConfig(
+                    host=self._host_edit.text().strip() or "localhost",
+                    port=self._port_spin.value(),
+                    parameter=self._map_update_param_edit.text().strip() or DEFAULT_MAP_UPDATE_PARAM,
+                )
             )
         return self._mapping_update_client
 
@@ -589,11 +580,9 @@ class LocalizationPanel(QWidget):
         if self._map_fetch_client is None or self._owns_fetch_client:
             self._map_fetch_client = MapFetchClient(
                 MapFetchConfig(
-                    ssh_host=self._mapping_host_edit.text().strip() or DEFAULT_MAPPING_SSH_HOST,
+                    host=self._host_edit.text().strip() or "localhost",
+                    port=self._port_spin.value(),
                     map_topic=self._map_topic_edit.text().strip(),
-                    remote_snapshot_path=self._remote_snapshot_path_edit.text().strip(),
-                    remote_map_path=self._remote_map_path_edit.text().strip(),
-                    snapshot_command=self._snapshot_command_edit.text().strip(),
                     local_map_path=self._local_map_path_edit.text().strip(),
                 )
             )

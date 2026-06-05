@@ -80,13 +80,20 @@ class LocalizationPanelTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_default_map_fetch_config_uses_actual_laser_map_topic(self) -> None:
+    def test_default_map_fetch_config_uses_current_rosbridge_host_port_and_laser_map_topic(self) -> None:
         panel = LocalizationPanel()
+        panel._host_edit.setText("robot.local")
+        panel._port_spin.setValue(19090)
 
+        mapping = panel._current_mapping_update_client()
         fetcher = panel._current_map_fetch_client()
 
+        self.assertEqual(mapping.config.host, "robot.local")
+        self.assertEqual(mapping.config.port, 19090)
+        self.assertEqual(mapping.config.parameter, "/mapping/map_update_enable")
+        self.assertEqual(fetcher.config.host, "robot.local")
+        self.assertEqual(fetcher.config.port, 19090)
         self.assertEqual(fetcher.config.map_topic, "/Laser_map")
-        self.assertEqual(fetcher.config.remote_map_path, "")
 
     def test_trajectory_plot_keeps_equal_xy_scale_for_map_overlay(self) -> None:
         panel = LocalizationPanel()

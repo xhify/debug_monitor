@@ -1,74 +1,136 @@
-"""Remote ROS map update enable/disable control."""
+"""ROSbridge map update enable/disable control."""
 
 from __future__ import annotations
 
-import subprocess
-from typing import Callable
+from dataclasses import dataclass
+import json
+from typing import Any, Callable
+
+from app_config import DEFAULT_MAP_UPDATE_PARAM, DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
 
 
-DEFAULT_MAPPING_SSH_HOST = "wheeltec14"
 DEFAULT_TIMEOUT_SECONDS = 8.0
-ROS_SETUP_COMMAND = "source /opt/ros/noetic/setup.bash"
-MAP_UPDATE_PARAM = "/mapping/map_update_enable"
+MAP_UPDATE_PARAM = DEFAULT_MAP_UPDATE_PARAM
 
 
 class MappingUpdateError(RuntimeError):
     """Raised when the remote ROS map update parameter cannot be changed."""
 
 
+@dataclass(frozen=True, slots=True)
+class MappingUpdateConfig:
+    host: str = DEFAULT_ROSBRIDGE_HOST
+    port: int = DEFAULT_ROSBRIDGE_PORT
+    parameter: str = DEFAULT_MAP_UPDATE_PARAM
+    timeout: float = DEFAULT_TIMEOUT_SECONDS
+
+
 class MappingUpdateClient:
-    """Toggle FAST-LIO mapping updates through a configurable remote command."""
+    """Toggle FAST-LIO mapping updates through ROSbridge."""
 
     def __init__(
         self,
-        ssh_host: str = DEFAULT_MAPPING_SSH_HOST,
-        freeze_command: str | None = None,
-        resume_command: str | None = None,
-        timeout: float = DEFAULT_TIMEOUT_SECONDS,
-        runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        config: MappingUpdateConfig | None = None,
+        *,
+        ros_factory: Callable[[str, int], Any] | None = None,
+        param_factory: Callable[[Any, str], Any] | None = None,
+        service_factory: Callable[[Any, str, str], Any] | None = None,
+        service_request_factory: Callable[[dict], Any] | None = None,
+        runner: Callable[..., Any] | None = None,
     ) -> None:
-        self.ssh_host = ssh_host
-        self.freeze_command = freeze_command
-        self.resume_command = resume_command
-        self.timeout = float(timeout)
+        self.config = config or MappingUpdateConfig()
+        self._ros_factory = ros_factory
+        self._param_factory = param_factory
+        self._service_factory = service_factory
+        self._service_request_factory = service_request_factory
         self._runner = runner
 
     def set_map_update_enabled(self, enabled: bool) -> dict[str, object]:
-        remote_command = self._command_for_enabled(enabled)
-        args = ["ssh", self.ssh_host, remote_command]
+        self._load_default_factories()
+        ros = self._ros_factory(self.config.host, int(self.config.port))
+        param_error: Exception | None = None
         try:
-            result = self._runner(
-                args,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=self.timeout,
-            )
-        except OSError as exc:
-            raise MappingUpdateError(f"建图冻结命令执行失败: {exc}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise MappingUpdateError(f"建图冻结命令超时: {MAP_UPDATE_PARAM}") from exc
+            ros.run()
+            try:
+                self._set_via_param(ros, enabled)
+                method = "rosbridge_param"
+            except Exception as exc:
+                param_error = exc
+                self._set_via_rosapi_service(ros, enabled, param_error)
+                method = "rosbridge_service"
+            return {
+                "enabled": bool(enabled),
+                "method": method,
+                "command": self._command_description(enabled, method),
+            }
+        except MappingUpdateError:
+            raise
+        except Exception as exc:
+            raise MappingUpdateError(
+                f"ROSbridge connection failed for {self.config.host}:{self.config.port}: {exc}"
+            ) from exc
+        finally:
+            close = getattr(ros, "close", None)
+            if callable(close):
+                close()
 
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            if detail:
-                raise MappingUpdateError(f"{MAP_UPDATE_PARAM} 设置失败: {detail}")
-            raise MappingUpdateError(f"{MAP_UPDATE_PARAM} 设置失败: returncode={result.returncode}")
+    def _set_via_param(self, ros: Any, enabled: bool) -> None:
+        if self._param_factory is None:
+            raise MappingUpdateError("roslibpy Param is unavailable")
+        param = self._param_factory(ros, self.config.parameter)
+        param.set(bool(enabled))
 
-        return {
-            "enabled": bool(enabled),
-            "method": "custom" if self._uses_custom_command(enabled) else "rosparam",
-            "command": " ".join(args),
-            "stdout": (result.stdout or "").strip(),
-            "stderr": (result.stderr or "").strip(),
+    def _set_via_rosapi_service(self, ros: Any, enabled: bool, param_error: Exception | None) -> None:
+        if self._service_factory is None:
+            raise self._rosapi_error(param_error)
+        service = self._service_factory(ros, "/rosapi/set_param", "rosapi/SetParam")
+        payload = {
+            "name": self.config.parameter,
+            "value": json.dumps(bool(enabled)),
         }
+        request = self._service_request_factory(payload) if self._service_request_factory else payload
+        try:
+            response = service.call(request, timeout=float(self.config.timeout))
+        except TypeError:
+            response = service.call(request)
+        except Exception as exc:
+            raise self._rosapi_error(param_error, exc) from exc
 
-    def _command_for_enabled(self, enabled: bool) -> str:
-        custom_command = self.resume_command if enabled else self.freeze_command
-        if custom_command:
-            return custom_command
+        if isinstance(response, dict) and response.get("success") is False:
+            detail = response.get("message") or response
+            raise self._rosapi_error(param_error, RuntimeError(str(detail)))
+
+    def _rosapi_error(
+        self,
+        param_error: Exception | None,
+        service_error: Exception | None = None,
+    ) -> MappingUpdateError:
+        detail_parts = []
+        if param_error is not None:
+            detail_parts.append(f"Param: {param_error}")
+        if service_error is not None:
+            detail_parts.append(f"rosapi: {service_error}")
+        detail = "; ".join(detail_parts) or "Param and rosapi service are unavailable"
+        return MappingUpdateError(
+            f"Failed to set {self.config.parameter} through ROSbridge ({detail}). "
+            "Start rosbridge_server and rosapi on the ROS host."
+        )
+
+    def _command_description(self, enabled: bool, method: str) -> str:
         value = "true" if enabled else "false"
-        return f"{ROS_SETUP_COMMAND} && rosparam set {MAP_UPDATE_PARAM} {value}"
+        return f"rosbridge://{self.config.host}:{self.config.port} {method} {self.config.parameter}={value}"
 
-    def _uses_custom_command(self, enabled: bool) -> bool:
-        return bool(self.resume_command if enabled else self.freeze_command)
+    def _load_default_factories(self) -> None:
+        if self._ros_factory is not None:
+            return
+        try:
+            import roslibpy
+        except ImportError as exc:
+            raise MappingUpdateError("Missing dependency roslibpy. Install requirements.txt first.") from exc
+        self._ros_factory = roslibpy.Ros
+        if self._param_factory is None and hasattr(roslibpy, "Param"):
+            self._param_factory = roslibpy.Param
+        if self._service_factory is None:
+            self._service_factory = roslibpy.Service
+        if self._service_request_factory is None and hasattr(roslibpy, "ServiceRequest"):
+            self._service_request_factory = roslibpy.ServiceRequest

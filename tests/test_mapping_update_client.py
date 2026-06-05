@@ -4,83 +4,132 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mapping_update_client import MappingUpdateClient, MappingUpdateError
+from mapping_update_client import MappingUpdateClient, MappingUpdateConfig, MappingUpdateError
 
 
-class CompletedProcess:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+class FakeRos:
+    instances = []
+
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+        self.ran = False
+        self.closed = False
+        FakeRos.instances.append(self)
+
+    def run(self) -> None:
+        self.ran = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeParam:
+    values = []
+    fail = False
+
+    def __init__(self, ros: FakeRos, name: str) -> None:
+        self.ros = ros
+        self.name = name
+
+    def set(self, value: bool) -> None:
+        if FakeParam.fail:
+            raise RuntimeError("param unavailable")
+        FakeParam.values.append((self.ros.host, self.ros.port, self.name, value))
+
+
+class FakeService:
+    calls = []
+
+    def __init__(self, ros: FakeRos, name: str, service_type: str) -> None:
+        self.ros = ros
+        self.name = name
+        self.service_type = service_type
+
+    def call(self, request, timeout=None):
+        FakeService.calls.append((self.name, self.service_type, dict(request), timeout))
+        return {"success": True}
 
 
 class MappingUpdateClientTests(unittest.TestCase):
-    def test_freeze_and_resume_send_expected_rosparam_values_over_ssh(self) -> None:
-        calls = []
+    def setUp(self) -> None:
+        FakeRos.instances = []
+        FakeParam.values = []
+        FakeParam.fail = False
+        FakeService.calls = []
 
-        def runner(args, capture_output, text, check, timeout):
-            calls.append((args, capture_output, text, check, timeout))
-            return CompletedProcess(stdout="ok\n")
+    def test_freeze_and_resume_set_rosbridge_param_without_subprocess_runner(self) -> None:
+        def forbidden_runner(*args, **kwargs):
+            raise AssertionError("subprocess runner must not be called")
 
-        client = MappingUpdateClient(ssh_host="wheeltec14", timeout=3.5, runner=runner)
+        client = MappingUpdateClient(
+            MappingUpdateConfig(host="robot.local", port=19090, parameter="/mapping/map_update_enable", timeout=3.5),
+            ros_factory=FakeRos,
+            param_factory=FakeParam,
+            runner=forbidden_runner,
+        )
 
         frozen = client.set_map_update_enabled(False)
         resumed = client.set_map_update_enabled(True)
 
         self.assertFalse(frozen["enabled"])
         self.assertTrue(resumed["enabled"])
+        self.assertEqual(frozen["method"], "rosbridge_param")
+        self.assertEqual(resumed["method"], "rosbridge_param")
         self.assertEqual(
-            calls[0][0],
+            FakeParam.values,
             [
-                "ssh",
-                "wheeltec14",
-                "source /opt/ros/noetic/setup.bash && rosparam set /mapping/map_update_enable false",
+                ("robot.local", 19090, "/mapping/map_update_enable", False),
+                ("robot.local", 19090, "/mapping/map_update_enable", True),
             ],
         )
+        self.assertTrue(all(ros.closed for ros in FakeRos.instances))
+        self.assertNotIn("ssh", str(frozen["command"]))
+
+    def test_falls_back_to_rosapi_set_param_service_when_param_fails(self) -> None:
+        FakeParam.fail = True
+        client = MappingUpdateClient(
+            MappingUpdateConfig(host="robot.local", port=9090, parameter="/mapping/map_update_enable", timeout=2.0),
+            ros_factory=FakeRos,
+            param_factory=FakeParam,
+            service_factory=FakeService,
+        )
+
+        result = client.set_map_update_enabled(False)
+
+        self.assertEqual(result["method"], "rosbridge_service")
         self.assertEqual(
-            calls[1][0],
+            FakeService.calls,
             [
-                "ssh",
-                "wheeltec14",
-                "source /opt/ros/noetic/setup.bash && rosparam set /mapping/map_update_enable true",
+                (
+                    "/rosapi/set_param",
+                    "rosapi/SetParam",
+                    {"name": "/mapping/map_update_enable", "value": "false"},
+                    2.0,
+                )
             ],
         )
-        self.assertEqual(calls[0][4], 3.5)
 
-    def test_nonzero_rosparam_command_raises_clear_error(self) -> None:
-        def runner(args, capture_output, text, check, timeout):
-            return CompletedProcess(returncode=1, stderr="unknown parameter")
+    def test_rosapi_failure_explains_required_host_services(self) -> None:
+        class FailingService(FakeService):
+            def call(self, request, timeout=None):
+                raise RuntimeError("service missing")
 
-        client = MappingUpdateClient(runner=runner)
+        FakeParam.fail = True
+        client = MappingUpdateClient(
+            MappingUpdateConfig(host="robot.local", port=9090),
+            ros_factory=FakeRos,
+            param_factory=FakeParam,
+            service_factory=FailingService,
+        )
 
         with self.assertRaises(MappingUpdateError) as ctx:
             client.set_map_update_enabled(False)
 
-        self.assertIn("/mapping/map_update_enable", str(ctx.exception))
-        self.assertIn("unknown parameter", str(ctx.exception))
-
-    def test_custom_remote_commands_can_match_actual_mapping_package(self) -> None:
-        calls = []
-
-        def runner(args, capture_output, text, check, timeout):
-            calls.append(args)
-            return CompletedProcess(stdout="ok")
-
-        client = MappingUpdateClient(
-            ssh_host="robot",
-            freeze_command="rosservice call /fastlio/freeze_mapping",
-            resume_command="rosservice call /fastlio/resume_mapping",
-            timeout=2.0,
-            runner=runner,
-        )
-
-        frozen = client.set_map_update_enabled(False)
-        resumed = client.set_map_update_enabled(True)
-
-        self.assertEqual(calls[0], ["ssh", "robot", "rosservice call /fastlio/freeze_mapping"])
-        self.assertEqual(calls[1], ["ssh", "robot", "rosservice call /fastlio/resume_mapping"])
-        self.assertEqual(frozen["method"], "custom")
-        self.assertEqual(resumed["method"], "custom")
+        message = str(ctx.exception)
+        self.assertIn("rosapi", message)
+        self.assertIn("rosbridge", message)
+        self.assertIn("/mapping/map_update_enable", message)
 
 
 if __name__ == "__main__":
