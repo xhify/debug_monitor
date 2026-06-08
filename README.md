@@ -310,3 +310,39 @@ debug_monitor/
 | 数据缓冲 | 3000 点（约 30 秒） |
 
 详细协议说明见 [docs/Debug_UART_Protocol.md](docs/Debug_UART_Protocol.md)。
+## 8. 汇总记录打包
+
+汇总页面现在支持作为统一记录入口使用：
+
+- 默认保存目录为 `D:\debug_monitor\recordings`
+- 可记录数据源默认全选
+- 支持配置轨迹主话题，默认使用 `/Odometry`
+- 汇总录制会把原有串口/ROS/IMU 记录结果整理到会话目录，并额外生成：
+  - `raw/` 原始数据副本
+  - `aligned/trajectory_aligned.csv`
+  - `aligned/chassis_100hz_aligned.csv`
+  - `manifest.json`
+  - `session_YYYYMMDD_HHMMSS.zip`
+
+当前汇总记录输出会保留现有 CSV 字段顺序，并在新增记录器中追加统一的会话字段，例如：
+
+- `session_id`
+- `recv_time_epoch_s`
+- `session_elapsed_s`
+- ROS 记录中的 `ros_time`
+- ROS 记录中的 `frame_id`
+
+新增支持的原始记录类型包括：
+
+- FAST-LIO `/Odometry`
+- `/PowerVoltage`
+- `/wheeltec/akm_state`
+- `/wheeltec/control_debug`
+- `/wheeltec/chassis_diagnostics`
+
+谐波雷达离线解析工具位于 `src/radar_bin_parser.py`，会生成：
+
+- `radar_timeline.csv`
+- `radar_sweeps.csv`
+- `radar_complex.npz`
+- `radar_metadata.json`

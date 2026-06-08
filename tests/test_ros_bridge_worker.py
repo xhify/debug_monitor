@@ -76,9 +76,13 @@ class RosBridgeSessionTests(unittest.TestCase):
             [(topic.name, topic.message_type) for topic in FakeTopic.created],
             [
                 ("/odom", "nav_msgs/Odometry"),
+                ("/Odometry", "nav_msgs/Odometry"),
                 ("/imu", "sensor_msgs/Imu"),
                 ("/active_imu", "sensor_msgs/Imu"),
                 ("/PowerVoltage", "std_msgs/Float32"),
+                ("/wheeltec/akm_state", "turn_on_wheeltec_robot/AkmState"),
+                ("/wheeltec/control_debug", "turn_on_wheeltec_robot/ControlDebug"),
+                ("/wheeltec/chassis_diagnostics", "turn_on_wheeltec_robot/ChassisDiagnostics"),
                 ("/cmd_vel", "geometry_msgs/Twist"),
                 ("/line_follow_control", "simple_follower/LineFollowControl"),
                 ("/launch_manager/command", "std_msgs/String"),
@@ -326,7 +330,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertFalse(session.connected)
         self.assertTrue(session.ros.closed)
         self.assertFalse(session.ros.terminated)
-        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:4]))
+        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:8]))
 
     def test_disconnect_tolerates_roslibpy_missing_thread_terminate_bug(self) -> None:
         session = RosBridgeSession(
@@ -342,7 +346,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertFalse(session.connected)
         self.assertTrue(session.ros.closed)
         self.assertFalse(session.ros.terminated)
-        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:4]))
+        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:8]))
 
     def test_session_can_connect_again_after_disconnect_without_restarting_reactor(self) -> None:
         session = RosBridgeSession(

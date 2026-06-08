@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
@@ -33,14 +34,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app_config import DEFAULT_FASTLIO_ODOM_TOPIC, DEFAULT_RECORDINGS_DIR
+from akm_topic_recorders import AkmStateRecorder, ChassisDiagnosticsRecorder, ControlDebugRecorder
 from analytics import compute_channel_metrics
 from data_buffer import COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B, DataBuffer
 from recording_session import RecordingSession
+from radar_bin_parser import parse_radar_recording
 from radar_scpi import RadarScpiClient
 from replay_data import ReplayData
 from ros_bridge_worker import RosBridgeWorker
 from ros_data import RosSummaryRecordingSession
+from ros_topic_recorders import RosTopicMonitor, make_odometry_recorder, make_power_voltage_recorder
+from recording_clock import RecordingClock
 from serial_worker import SerialWorker
+from summary_package import build_summary_package
 from widgets.analysis_panel import AnalysisPanel
 from widgets.command_panel import CommandPanel
 from widgets.data_panel import DataPanel
@@ -62,6 +69,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("WHEELTEC C50X 调试监视器")
+        self.setMinimumSize(100, 100)
         self._apply_initial_window_size()
 
         self._buffer = DataBuffer()
@@ -71,6 +79,7 @@ class MainWindow(QMainWindow):
         self._worker.connection_changed.connect(self._on_connection_changed)
         self._ros_worker = RosBridgeWorker()
         self._ros_worker.snapshot_received.connect(self._on_ros_snapshot)
+        self._ros_worker.message_received.connect(self._on_ros_message)
         self._ros_worker.error_occurred.connect(self._on_error)
         self._ros_worker.connection_changed.connect(self._on_ros_connection_changed)
 
@@ -86,6 +95,10 @@ class MainWindow(QMainWindow):
         self._summary_session_dir: Path | None = None
         self._summary_radar_recording = False
         self._summary_radar_filename = ""
+        self._summary_radar_started_epoch_s: float | None = None
+        self._summary_radar_started_session_elapsed_s = 0.0
+        self._summary_clock: RecordingClock | None = None
+        self._summary_topic_recorders: dict[str, object] = {}
         self._latest_ros_snapshot = None
         self._ros_connected = False
         self._radar_client = RadarScpiClient()
@@ -322,6 +335,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
+        layout.addWidget(self._build_summary_save_group())
+        layout.addWidget(self._build_summary_trajectory_group())
+        layout.addWidget(self._build_summary_source_group())
         layout.addWidget(self._build_summary_device_group("encoder", "编码器", [115200, 9600, 19200, 38400, 57600, 230400, 460800]))
         layout.addWidget(self._build_summary_device_group("imu_A", "IMU A", [460800, 230400, 115200, 57600, 38400, 19200, 9600, 921600]))
         layout.addWidget(self._build_summary_device_group("imu_B", "IMU B", [460800, 230400, 115200, 57600, 38400, 19200, 9600, 921600]))
@@ -349,19 +365,94 @@ class MainWindow(QMainWindow):
         radar_row.addWidget(self._summary_radar_status_label, stretch=1)
         record_layout.addLayout(radar_row)
 
+        radar_path_row = QGridLayout()
+        self._summary_radar_source_dir_edit = QLineEdit("")
+        self._summary_radar_source_dir_edit.setPlaceholderText("雷达软件输出 .bin 的目录")
+        self._summary_radar_xml_path_edit = QLineEdit("")
+        self._summary_radar_xml_path_edit.setPlaceholderText("radar_config.xml 路径")
+        radar_path_row.addWidget(QLabel("雷达目录"), 0, 0)
+        radar_path_row.addWidget(self._summary_radar_source_dir_edit, 0, 1)
+        radar_path_row.addWidget(QLabel("XML"), 1, 0)
+        radar_path_row.addWidget(self._summary_radar_xml_path_edit, 1, 1)
+        record_layout.addLayout(radar_path_row)
+
         button_row = QHBoxLayout()
+        self._summary_check_btn = QPushButton("检查可记录数据源")
+        self._summary_check_btn.clicked.connect(self._check_summary_sources)
+        button_row.addWidget(self._summary_check_btn)
         self._summary_record_btn = QPushButton("全部开始记录")
         self._summary_record_btn.clicked.connect(self._toggle_summary_recording)
         button_row.addWidget(self._summary_record_btn)
         self._summary_record_status_label = QLabel("")
         button_row.addWidget(self._summary_record_status_label, stretch=1)
         record_layout.addLayout(button_row)
+
+        self._summary_check_status_label = QLabel("")
+        record_layout.addWidget(self._summary_check_status_label)
         layout.addWidget(record_group)
         layout.addStretch()
 
         for key in ("encoder", "imu_A", "imu_B"):
             self._refresh_summary_ports(key)
         return page
+
+    def _build_summary_save_group(self) -> QGroupBox:
+        group = QGroupBox("保存目录")
+        layout = QGridLayout(group)
+        self._summary_save_dir_edit = QLineEdit(DEFAULT_RECORDINGS_DIR)
+        self._summary_session_name_edit = QLineEdit(self._summary_default_session_name())
+        choose_btn = QPushButton("选择目录")
+        choose_btn.clicked.connect(self._choose_summary_save_dir)
+
+        layout.addWidget(QLabel("目录"), 0, 0)
+        layout.addWidget(self._summary_save_dir_edit, 0, 1)
+        layout.addWidget(choose_btn, 0, 2)
+        layout.addWidget(QLabel("Session"), 1, 0)
+        layout.addWidget(self._summary_session_name_edit, 1, 1, 1, 2)
+        return group
+
+    def _build_summary_trajectory_group(self) -> QGroupBox:
+        group = QGroupBox("轨迹主话题")
+        layout = QGridLayout(group)
+        self._trajectory_topic_combo = QComboBox()
+        self._trajectory_topic_combo.addItem("FAST-LIO /Odometry", DEFAULT_FASTLIO_ODOM_TOPIC)
+        self._trajectory_topic_combo.addItem("Legacy /odom", "/odom")
+        self._trajectory_topic_combo.addItem("自定义 nav_msgs/Odometry", "__custom__")
+        self._trajectory_topic_combo.currentIndexChanged.connect(self._on_trajectory_topic_changed)
+        self._trajectory_topic_custom_edit = QLineEdit()
+        self._trajectory_topic_custom_edit.setPlaceholderText("/custom_odometry")
+        self._trajectory_topic_custom_edit.setEnabled(False)
+
+        layout.addWidget(QLabel("选择"), 0, 0)
+        layout.addWidget(self._trajectory_topic_combo, 0, 1)
+        layout.addWidget(QLabel("自定义"), 1, 0)
+        layout.addWidget(self._trajectory_topic_custom_edit, 1, 1)
+        return group
+
+    def _build_summary_source_group(self) -> QGroupBox:
+        group = QGroupBox("可记录数据源")
+        layout = QGridLayout(group)
+        source_items = [
+            ("fastlio_odometry", "/Odometry"),
+            ("ros_odom", "/odom"),
+            ("ros_imu", "/imu"),
+            ("ros_active_imu", "/active_imu"),
+            ("ros_power_voltage", "/PowerVoltage"),
+            ("akm_state", "/wheeltec/akm_state"),
+            ("control_debug", "/wheeltec/control_debug"),
+            ("chassis_diagnostics", "/wheeltec/chassis_diagnostics"),
+            ("serial_encoder", "串口编码器 / STM32 debug UART"),
+            ("imu_A", "串口 IMU A"),
+            ("imu_B", "串口 IMU B"),
+            ("radar_bin", "谐波雷达 .bin"),
+        ]
+        self._summary_source_checks = {}
+        for index, (source_id, label) in enumerate(source_items):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(True)
+            self._summary_source_checks[source_id] = checkbox
+            layout.addWidget(checkbox, index // 2, index % 2)
+        return group
 
     def _build_summary_device_group(self, key: str, title: str, bauds: list[int]) -> QGroupBox:
         group = QGroupBox(title)
@@ -535,31 +626,41 @@ class MainWindow(QMainWindow):
         self._status_label.setText("雷达连接测试通过")
 
     def _summary_should_record_radar(self) -> bool:
-        return self._summary_radar_sync_cb.isEnabled() and self._summary_radar_sync_cb.isChecked()
+        return (
+            self._summary_source_enabled("radar_bin")
+            and self._summary_radar_sync_cb.isEnabled()
+            and self._summary_radar_sync_cb.isChecked()
+        )
 
     def _start_summary_recording(
         self,
         base_dir: Path | None = None,
         timestamp: str | None = None,
     ) -> Path:
+        self._check_summary_sources()
         if timestamp is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = self._summary_session_timestamp()
         if base_dir is None:
-            base_dir = Path.cwd() / "recordings"
+            base_dir = Path(self._summary_save_dir_edit.text().strip() or DEFAULT_RECORDINGS_DIR)
         session_dir = self._create_summary_session_dir(Path(base_dir), timestamp)
+        self._summary_clock = RecordingClock(session_id=f"session_{timestamp}")
 
         try:
             if self._summary_should_record_radar():
+                self._summary_radar_started_epoch_s = self._summary_clock.now_epoch_s()
+                self._summary_radar_started_session_elapsed_s = self._summary_clock.elapsed_s()
                 self._summary_radar_filename = self._radar_client.start_recording(timestamp)
                 self._summary_radar_recording = True
                 self._summary_radar_status_label.setText(f"雷达记录中: {self._summary_radar_filename}")
         except Exception:
+            self._summary_clock = None
             session_dir.rmdir()
             raise
 
         try:
             self._summary_session_dir = session_dir
-            if self._summary_source("encoder") == "serial":
+            self._summary_topic_recorders = self._create_summary_topic_recorders(session_dir)
+            if self._summary_source("encoder") == "serial" and self._summary_source_enabled("serial_encoder"):
                 encoder_session = RecordingSession(base_dir=session_dir)
                 encoder_session.start()
                 self._buffer.start_recording(encoder_session)
@@ -602,8 +703,12 @@ class MainWindow(QMainWindow):
 
     def _write_summary_metadata(self, session_dir: Path, started_at: str, note: str) -> None:
         metadata = {
+            "session_id": f"session_{started_at}",
             "started_at": started_at,
+            "started_at_iso": datetime.now().astimezone().isoformat(timespec="seconds"),
             "note": note,
+            "selected_sources": self._selected_summary_sources(),
+            "trajectory_main_topic": self._summary_trajectory_topic(),
             "devices": {
                 "encoder": self._summary_device_metadata("encoder"),
                 "imu_A": self._summary_device_metadata("imu_A"),
@@ -616,12 +721,20 @@ class MainWindow(QMainWindow):
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
     def _summary_uses_ros(self) -> bool:
-        return self._summary_source("encoder") == "ros_odom" or any(
-            self._summary_source(key) == "ros_imu" for key in ("imu_A", "imu_B")
+        return (
+            self._summary_source_enabled("ros_odom")
+            and self._summary_source("encoder") == "ros_odom"
+        ) or any(
+            self._summary_source_enabled("ros_imu" if key == "imu_A" else "ros_active_imu")
+            and self._summary_source(key) == "ros_imu"
+            for key in ("imu_A", "imu_B")
         )
 
     def _summary_uses_serial_imu(self) -> bool:
-        return any(self._summary_source(key) == "serial" for key in ("imu_A", "imu_B"))
+        return any(
+            self._summary_source(key) == "serial" and self._summary_source_enabled(key)
+            for key in ("imu_A", "imu_B")
+        )
 
     def _summary_device_metadata(self, key: str) -> dict[str, object]:
         source = self._summary_source(key)
@@ -639,6 +752,8 @@ class MainWindow(QMainWindow):
             "host": getattr(self._radar_client, "host", "127.0.0.1"),
             "port": getattr(self._radar_client, "port", 5026),
             "filename": self._summary_radar_filename,
+            "source_dir": self._summary_radar_source_dir_edit.text().strip(),
+            "xml_path": self._summary_radar_xml_path_edit.text().strip(),
         }
 
     def _summary_files_metadata(self) -> dict[str, str]:
@@ -647,6 +762,8 @@ class MainWindow(QMainWindow):
             files["encoder"] = "encoder.csv"
         else:
             files["ros_odom"] = "ros_odom.csv"
+        if self._summary_source_enabled("fastlio_odometry"):
+            files["fastlio_odometry"] = "fastlio_odometry.csv"
         if self._summary_uses_serial_imu():
             files.update({
                 "imu_A": "imu_A.csv",
@@ -658,6 +775,16 @@ class MainWindow(QMainWindow):
             files["ros_imu"] = "ros_imu.csv"
             files["ros_active_imu"] = "ros_active_imu.csv"
             files["ros_imu_aligned"] = "ros_imu_merged_aligned.csv"
+        if self._summary_source_enabled("ros_power_voltage"):
+            files["ros_power_voltage"] = "ros_power_voltage.csv"
+        if self._summary_source_enabled("akm_state"):
+            files["akm_state"] = "akm_state.csv"
+        if self._summary_source_enabled("control_debug"):
+            files["control_debug"] = "control_debug.csv"
+        if self._summary_source_enabled("chassis_diagnostics"):
+            files["chassis_diagnostics"] = "chassis_diagnostics.csv"
+        if self._summary_source_enabled("radar_bin"):
+            files["radar_dir"] = "raw/radar"
         return files
 
     @staticmethod
@@ -669,10 +796,17 @@ class MainWindow(QMainWindow):
         ros_session = self._summary_ros_session
         session_dir = self._summary_session_dir
         radar_was_recording = self._summary_radar_recording
+        radar_started_epoch_s = self._summary_radar_started_epoch_s
+        radar_started_session_elapsed_s = self._summary_radar_started_session_elapsed_s
+        topic_recorders = dict(self._summary_topic_recorders)
         self._summary_encoder_session = None
         self._summary_ros_session = None
         self._summary_session_dir = None
         self._summary_radar_recording = False
+        self._summary_radar_started_epoch_s = None
+        self._summary_radar_started_session_elapsed_s = 0.0
+        self._summary_clock = None
+        self._summary_topic_recorders = {}
 
         self._record_btn.setText("开始记录")
         self._record_btn.setStyleSheet("")
@@ -699,6 +833,15 @@ class MainWindow(QMainWindow):
                 self._imu_panel.stop_recording(save=True)
             if ros_session is not None:
                 ros_session.finalize()
+            for recorder in topic_recorders.values():
+                recorder.close()
+            if radar_was_recording:
+                self._parse_summary_radar_outputs(
+                    session_dir=session_dir,
+                    host_start_epoch_s=radar_started_epoch_s,
+                    radar_start_session_elapsed_s=radar_started_session_elapsed_s,
+                )
+            build_summary_package(session_dir)
             self._summary_record_status_label.setText(f"已保存: {session_dir}")
             if radar_stop_error:
                 self._status_label.setText(f"同步记录已保存，但{radar_stop_error}")
@@ -712,6 +855,8 @@ class MainWindow(QMainWindow):
             self._imu_panel.stop_recording(save=False)
         if ros_session is not None:
             ros_session.cancel()
+        for recorder in topic_recorders.values():
+            recorder.close()
         self._summary_record_status_label.setText("同步记录已取消")
         if radar_stop_error:
             self._status_label.setText(f"同步记录已取消，但{radar_stop_error}")
@@ -774,6 +919,17 @@ class MainWindow(QMainWindow):
             self._ros_panel.update_snapshot(snapshot)
         if current_page is self._ros_imu_panel:
             self._ros_imu_panel.update_snapshot(snapshot)
+
+    def _on_ros_message(self, event) -> None:
+        if not self._is_summary_recording():
+            return
+        recorder = self._summary_topic_recorders.get(event.get("topic", ""))
+        if recorder is None:
+            return
+        recorder.write_message(
+            event.get("message", {}),
+            recv_time_epoch_s=event.get("recv_time_epoch_s"),
+        )
 
     def _on_refresh(self) -> None:
         time_arr, data, frame, title, footer = self._current_source_payload()
@@ -919,7 +1075,230 @@ class MainWindow(QMainWindow):
             rows = self._summary_ros_session.rows_written_by_stream
             parts.append(f"ROS odom {rows['odom']} 行")
             parts.append(f"ROS IMU {rows['imu']} 行")
+        for topic, recorder in self._summary_topic_recorders.items():
+            rows = getattr(recorder, "rows_written", None)
+            if rows:
+                parts.append(f"{topic} {rows} 行")
         return "记录中: " + ", ".join(parts)
+
+    def _summary_default_session_name(self) -> str:
+        return f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    def _summary_session_timestamp(self) -> str:
+        session_name = self._summary_session_name_edit.text().strip()
+        if not session_name:
+            return datetime.now().strftime("%Y%m%d_%H%M%S")
+        if session_name.startswith("session_"):
+            return session_name[len("session_"):]
+        return session_name
+
+    def _choose_summary_save_dir(self) -> None:
+        current = self._summary_save_dir_edit.text().strip() or DEFAULT_RECORDINGS_DIR
+        directory = QFileDialog.getExistingDirectory(self, "选择保存目录", current)
+        if directory:
+            self._summary_save_dir_edit.setText(directory)
+
+    def _on_trajectory_topic_changed(self) -> None:
+        custom = self._trajectory_topic_combo.currentData() == "__custom__"
+        self._trajectory_topic_custom_edit.setEnabled(custom)
+
+    def _summary_trajectory_topic(self) -> str:
+        current = self._trajectory_topic_combo.currentData()
+        if current == "__custom__":
+            return self._trajectory_topic_custom_edit.text().strip() or DEFAULT_FASTLIO_ODOM_TOPIC
+        return str(current or DEFAULT_FASTLIO_ODOM_TOPIC)
+
+    def _summary_source_enabled(self, source_id: str) -> bool:
+        checkbox = getattr(self, "_summary_source_checks", {}).get(source_id)
+        return True if checkbox is None else checkbox.isChecked()
+
+    def _selected_summary_sources(self) -> list[str]:
+        return [
+            source_id
+            for source_id, checkbox in getattr(self, "_summary_source_checks", {}).items()
+            if checkbox.isChecked()
+        ]
+
+    def _check_summary_sources(self) -> dict[str, dict[str, object]]:
+        results: dict[str, dict[str, object]] = {}
+        if self._summary_source_enabled("serial_encoder"):
+            results["serial_encoder"] = self._check_serial_source("encoder")
+        if self._summary_source_enabled("imu_A"):
+            results["imu_A"] = self._check_serial_source("imu_A")
+        if self._summary_source_enabled("imu_B"):
+            results["imu_B"] = self._check_serial_source("imu_B")
+        if self._summary_source_enabled("fastlio_odometry"):
+            results["fastlio_odometry"] = self._check_ros_source(DEFAULT_FASTLIO_ODOM_TOPIC, "nav_msgs/Odometry")
+        if self._summary_source_enabled("ros_odom"):
+            results["ros_odom"] = self._check_ros_source("/odom", "nav_msgs/Odometry")
+        if self._summary_source_enabled("ros_imu"):
+            results["ros_imu"] = self._check_ros_source("/imu", "sensor_msgs/Imu")
+        if self._summary_source_enabled("ros_active_imu"):
+            results["ros_active_imu"] = self._check_ros_source("/active_imu", "sensor_msgs/Imu")
+        if self._summary_source_enabled("ros_power_voltage"):
+            results["ros_power_voltage"] = self._check_ros_source("/PowerVoltage", "std_msgs/Float32")
+        if self._summary_source_enabled("akm_state"):
+            results["akm_state"] = self._check_ros_source(
+                "/wheeltec/akm_state",
+                "turn_on_wheeltec_robot/AkmState",
+                required_fields=("header.frame_id",),
+                warning_hz_below=80.0,
+            )
+        if self._summary_source_enabled("control_debug"):
+            results["control_debug"] = self._check_ros_source(
+                "/wheeltec/control_debug",
+                "turn_on_wheeltec_robot/ControlDebug",
+                required_fields=("header.frame_id",),
+                warning_hz_below=80.0,
+            )
+        if self._summary_source_enabled("chassis_diagnostics"):
+            results["chassis_diagnostics"] = self._check_ros_source(
+                "/wheeltec/chassis_diagnostics",
+                "turn_on_wheeltec_robot/ChassisDiagnostics",
+                required_fields=("header.frame_id",),
+                warning_hz_below=80.0,
+            )
+        if self._summary_source_enabled("radar_bin"):
+            results["radar_bin"] = self._check_radar_source()
+
+        offline = sum(1 for item in results.values() if item["status"] == "offline")
+        warnings = sum(1 for item in results.values() if item["status"] == "warning")
+        errors = sum(1 for item in results.values() if item["status"] == "error")
+        self._summary_check_status_label.setText(
+            f"检查完成: {len(results)} 项，offline {offline}，warning {warnings}，error {errors}"
+        )
+        return results
+
+    def _check_serial_source(self, key: str) -> dict[str, object]:
+        if self._summary_source(key) != "serial":
+            return {"status": "skipped", "estimated_hz": 0.0, "has_header_stamp": False, "notes": "使用 ROS 源"}
+        port = self._summary_port(key).strip()
+        connected = False
+        frame_count = 0
+        if key == "encoder":
+            connected = self._serial_connected(self._worker)
+            frame_count = self._buffer.frame_index
+        else:
+            device_key = "A" if key == "imu_A" else "B"
+            device = self._imu_panel._devices[device_key]
+            connected = self._serial_connected(device.worker)
+            frame_count = device.buffer.frame_index
+        status = "ok" if connected and frame_count > 0 else "offline"
+        notes = "串口在线" if status == "ok" else ("未选择串口" if not port else "串口未在线")
+        return {
+            "status": status,
+            "estimated_hz": 0.0,
+            "has_header_stamp": False,
+            "notes": notes,
+        }
+
+    def _check_ros_source(
+        self,
+        topic: str,
+        expected_type: str,
+        required_fields: tuple[str, ...] = (),
+        warning_hz_below: float | None = None,
+    ) -> dict[str, object]:
+        monitor = RosTopicMonitor(
+            topic=topic,
+            expected_type=expected_type,
+            required_fields=required_fields,
+            warning_hz_below=warning_hz_below,
+        )
+        if self._latest_ros_snapshot is not None and self._ros_connected:
+            synthetic_message = {"header": {"frame_id": "available", "stamp": {"secs": 1, "nsecs": 0}}}
+            monitor.observe(
+                synthetic_message,
+                message_type=expected_type,
+                recv_time_epoch_s=datetime.now().timestamp(),
+            )
+        result = monitor.result()
+        return {
+            "status": result.status if self._ros_connected else "offline",
+            "estimated_hz": result.estimated_hz if self._ros_connected else 0.0,
+            "has_header_stamp": result.has_header_stamp if self._ros_connected else False,
+            "notes": result.notes if self._ros_connected else "ROS 未连接",
+        }
+
+    def _check_radar_source(self) -> dict[str, object]:
+        if not self._summary_radar_sync_cb.isChecked():
+            return {"status": "skipped", "estimated_hz": 0.0, "has_header_stamp": False, "notes": "未启用雷达同步"}
+        source_dir_text = self._summary_radar_source_dir_edit.text().strip()
+        xml_path_text = self._summary_radar_xml_path_edit.text().strip()
+        try:
+            response = self._radar_client.identify()
+        except Exception as exc:
+            return {"status": "offline", "estimated_hz": 0.0, "has_header_stamp": False, "notes": str(exc)}
+        notes = [response]
+        status = "ok"
+        if not source_dir_text or not Path(source_dir_text).exists():
+            status = "warning"
+            notes.append("未配置有效雷达输出目录")
+        if not xml_path_text or not Path(xml_path_text).exists():
+            status = "warning"
+            notes.append("未配置有效 XML")
+        return {"status": status, "estimated_hz": 0.0, "has_header_stamp": False, "notes": "; ".join(notes)}
+
+    def _create_summary_topic_recorders(self, session_dir: Path) -> dict[str, object]:
+        if self._summary_clock is None:
+            return {}
+        recorders: dict[str, object] = {}
+        if self._summary_source_enabled("fastlio_odometry"):
+            recorders[DEFAULT_FASTLIO_ODOM_TOPIC] = make_odometry_recorder(
+                session_dir / "fastlio_odometry.csv",
+                self._summary_clock,
+            )
+        if self._summary_source_enabled("ros_power_voltage"):
+            recorders["/PowerVoltage"] = make_power_voltage_recorder(
+                session_dir / "ros_power_voltage.csv",
+                self._summary_clock,
+            )
+        if self._summary_source_enabled("akm_state"):
+            recorders["/wheeltec/akm_state"] = AkmStateRecorder(
+                session_dir / "akm_state.csv",
+                self._summary_clock,
+            )
+        if self._summary_source_enabled("control_debug"):
+            recorders["/wheeltec/control_debug"] = ControlDebugRecorder(
+                session_dir / "control_debug.csv",
+                self._summary_clock,
+            )
+        if self._summary_source_enabled("chassis_diagnostics"):
+            recorders["/wheeltec/chassis_diagnostics"] = ChassisDiagnosticsRecorder(
+                session_dir / "chassis_diagnostics.csv",
+                self._summary_clock,
+            )
+        return recorders
+
+    def _parse_summary_radar_outputs(
+        self,
+        session_dir: Path,
+        host_start_epoch_s: float | None,
+        radar_start_session_elapsed_s: float,
+    ) -> None:
+        if not self._summary_radar_filename:
+            return
+        source_dir_text = self._summary_radar_source_dir_edit.text().strip()
+        xml_path_text = self._summary_radar_xml_path_edit.text().strip()
+        if not source_dir_text or not xml_path_text:
+            return
+        bin_path = Path(source_dir_text) / self._summary_radar_filename
+        xml_path = Path(xml_path_text)
+        if not bin_path.exists() or not xml_path.exists():
+            self._summary_radar_status_label.setText("雷达文件未找到，跳过解析")
+            return
+        output_dir = session_dir / "raw" / "radar"
+        host_stop_epoch_s = datetime.now().timestamp()
+        parse_radar_recording(
+            bin_path=bin_path,
+            xml_path=xml_path,
+            output_dir=output_dir,
+            session_id=session_dir.name,
+            radar_start_session_elapsed_s=radar_start_session_elapsed_s,
+            host_start_epoch_s=host_start_epoch_s if host_start_epoch_s is not None else host_stop_epoch_s,
+            host_stop_epoch_s=host_stop_epoch_s,
+        )
+        self._summary_radar_status_label.setText(f"雷达已解析: {output_dir}")
 
     def _toggle_record(self) -> None:
         if not self._buffer.recording:
@@ -1063,7 +1442,12 @@ class MainWindow(QMainWindow):
             return
         self._fit_window_to_screen()
         self._center_on_screen()
+        QTimer.singleShot(0, self._finalize_initial_screen_fit)
         self._initial_screen_fit_done = True
+
+    def _finalize_initial_screen_fit(self) -> None:
+        self._fit_window_to_screen()
+        self._center_on_screen()
 
     def _fit_window_to_screen(self) -> None:
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -1075,8 +1459,9 @@ class MainWindow(QMainWindow):
         geometry = self.geometry()
         frame_extra_width = max(0, frame.width() - geometry.width())
         frame_extra_height = max(0, frame.height() - geometry.height())
-        target_width = max(100, available.width() - frame_extra_width)
-        target_height = max(100, available.height() - frame_extra_height)
+        safety_margin = 8
+        target_width = max(100, available.width() - frame_extra_width - safety_margin)
+        target_height = max(100, available.height() - frame_extra_height - safety_margin)
         self.resize(
             min(self.width(), target_width),
             min(self.height(), target_height),

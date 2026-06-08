@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QThread, Signal
 
-from app_config import DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
+from app_config import DEFAULT_FASTLIO_ODOM_TOPIC, DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
 
 
 @dataclass(slots=True)
@@ -103,9 +103,13 @@ class RosBridgeSession:
 
     SUBSCRIPTIONS = (
         ("/odom", "nav_msgs/Odometry"),
+        (DEFAULT_FASTLIO_ODOM_TOPIC, "nav_msgs/Odometry"),
         ("/imu", "sensor_msgs/Imu"),
         ("/active_imu", "sensor_msgs/Imu"),
         ("/PowerVoltage", "std_msgs/Float32"),
+        ("/wheeltec/akm_state", "turn_on_wheeltec_robot/AkmState"),
+        ("/wheeltec/control_debug", "turn_on_wheeltec_robot/ControlDebug"),
+        ("/wheeltec/chassis_diagnostics", "turn_on_wheeltec_robot/ChassisDiagnostics"),
     )
     CMD_VEL_TOPIC = ("/cmd_vel", "geometry_msgs/Twist")
     LINE_FOLLOW_CONTROL_TOPIC = ("/line_follow_control", "simple_follower/LineFollowControl")
@@ -120,6 +124,7 @@ class RosBridgeSession:
         topic_factory: Callable[[Any, str, str], Any] | None = None,
         message_factory: Callable[[dict], Any] | None = None,
         on_snapshot: Callable[[RosSnapshot], None] | None = None,
+        on_message: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -127,6 +132,7 @@ class RosBridgeSession:
         self._topic_factory = topic_factory
         self._message_factory = message_factory
         self._on_snapshot = on_snapshot
+        self._on_message = on_message
         self._lock = threading.Lock()
         self._snapshot = RosSnapshot()
         self._topics: dict[str, Any] = {}
@@ -223,11 +229,19 @@ class RosBridgeSession:
 
     def _callback_for(self, name: str) -> Callable[[dict], None]:
         if name == "/odom":
-            return self._on_odom
+            return lambda message, topic_name=name: self._on_odom(topic_name, message)
+        if name == DEFAULT_FASTLIO_ODOM_TOPIC:
+            return lambda message, topic_name=name: self._on_passthrough(topic_name, message)
         if name in ("/imu", "/active_imu"):
             return lambda message, topic_name=name: self._on_imu(topic_name, message)
         if name == "/PowerVoltage":
-            return self._on_voltage
+            return lambda message, topic_name=name: self._on_voltage(topic_name, message)
+        if name in (
+            "/wheeltec/akm_state",
+            "/wheeltec/control_debug",
+            "/wheeltec/chassis_diagnostics",
+        ):
+            return lambda message, topic_name=name: self._on_passthrough(topic_name, message)
         raise ValueError(f"unsupported ROS topic: {name}")
 
     def _publish_snapshot(self) -> None:
@@ -235,7 +249,7 @@ class RosBridgeSession:
         if self._on_snapshot is not None:
             self._on_snapshot(snapshot)
 
-    def _on_odom(self, message: dict) -> None:
+    def _on_odom(self, topic_name: str, message: dict) -> None:
         recv_time = time.time()
         header = message.get("header", {})
         twist = message.get("twist", {}).get("twist", {})
@@ -258,9 +272,10 @@ class RosBridgeSession:
             self._snapshot.odom_ros_time = _stamp_to_seconds(header)
             self._snapshot.odom_frame_id = str(header.get("frame_id", ""))
             self._snapshot.odom_recv_time = recv_time
-            self._snapshot.last_topic = "/odom"
+            self._snapshot.last_topic = topic_name
             self._snapshot.frame_count += 1
         self._publish_snapshot()
+        self._publish_message(topic_name, "nav_msgs/Odometry", message, recv_time)
 
     def _on_imu(self, topic_name: str, message: dict) -> None:
         recv_time = time.time()
@@ -314,19 +329,49 @@ class RosBridgeSession:
             self._snapshot.last_topic = topic_name
             self._snapshot.frame_count += 1
         self._publish_snapshot()
+        self._publish_message(topic_name, "sensor_msgs/Imu", message, recv_time)
 
-    def _on_voltage(self, message: dict) -> None:
+    def _on_voltage(self, topic_name: str, message: dict) -> None:
+        recv_time = time.time()
         with self._lock:
             self._snapshot.voltage = float(message.get("data", 0.0))
-            self._snapshot.last_topic = "/PowerVoltage"
+            self._snapshot.last_topic = topic_name
             self._snapshot.frame_count += 1
         self._publish_snapshot()
+        self._publish_message(topic_name, "std_msgs/Float32", message, recv_time)
+
+    def _on_passthrough(self, topic_name: str, message: dict) -> None:
+        recv_time = time.time()
+        with self._lock:
+            self._snapshot.last_topic = topic_name
+            self._snapshot.frame_count += 1
+        self._publish_snapshot()
+        self._publish_message(topic_name, self._topic_type(topic_name), message, recv_time)
+
+    def _publish_message(self, topic_name: str, message_type: str, message: dict, recv_time: float) -> None:
+        if self._on_message is None:
+            return
+        self._on_message(
+            {
+                "topic": topic_name,
+                "message_type": message_type,
+                "message": dict(message),
+                "recv_time_epoch_s": float(recv_time),
+            }
+        )
+
+    def _topic_type(self, topic_name: str) -> str:
+        for name, message_type in self.SUBSCRIPTIONS:
+            if name == topic_name:
+                return message_type
+        return ""
 
 
 class RosBridgeWorker(QThread):
     """Qt thread wrapper for rosbridge websocket access."""
 
     snapshot_received = Signal(object)
+    message_received = Signal(object)
     error_occurred = Signal(str)
     connection_changed = Signal(bool)
 
@@ -399,6 +444,7 @@ class RosBridgeWorker(QThread):
                 host=self._host,
                 port=self._port,
                 on_snapshot=self.snapshot_received.emit,
+                on_message=self.message_received.emit,
             )
             self._session.connect()
             self.connection_changed.emit(True)

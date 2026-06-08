@@ -80,6 +80,18 @@ class FakeRadarClient:
         self.stopped += 1
 
 
+def make_radar_big_frame(offset: int = 0) -> bytes:
+    import numpy as np
+
+    header = bytearray(16)
+    header[8] = offset & 0xFF
+    header[9] = (offset >> 8) & 0xFF
+    iq_values = np.arange(65120, dtype=">i2")
+    body = iq_values.tobytes()
+    footer = bytes(4)
+    return bytes(header) + body + footer
+
+
 class MainWindowReplayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -299,6 +311,61 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertGreaterEqual(imu_source.findData("serial"), 0)
         self.assertGreaterEqual(imu_source.findData("ros_imu"), 0)
 
+    def test_summary_page_defaults_to_recordings_directory(self) -> None:
+        window = MainWindow()
+
+        self.assertEqual(window._summary_save_dir_edit.text(), r"D:\debug_monitor\recordings")
+
+    def test_summary_page_defaults_all_recordable_sources_checked(self) -> None:
+        window = MainWindow()
+
+        self.assertTrue(window._summary_source_checks)
+        self.assertTrue(all(check.isChecked() for check in window._summary_source_checks.values()))
+
+    def test_summary_page_defaults_trajectory_topic_to_odometry(self) -> None:
+        window = MainWindow()
+
+        self.assertEqual(window._trajectory_topic_combo.currentData(), "/Odometry")
+        self.assertFalse(window._trajectory_topic_custom_edit.isEnabled())
+
+    def test_summary_page_exposes_check_sources_button(self) -> None:
+        window = MainWindow()
+
+        self.assertEqual(window._summary_check_btn.text(), "检查可记录数据源")
+
+    def test_summary_page_exposes_radar_source_directory_and_xml_fields(self) -> None:
+        window = MainWindow()
+
+        self.assertTrue(hasattr(window, "_summary_radar_source_dir_edit"))
+        self.assertTrue(hasattr(window, "_summary_radar_xml_path_edit"))
+
+    def test_check_summary_sources_reports_offline_when_ros_and_serial_are_unavailable(self) -> None:
+        window = MainWindow()
+
+        result = window._check_summary_sources()
+
+        self.assertIn("serial_encoder", result)
+        self.assertIn("fastlio_odometry", result)
+        self.assertEqual(result["fastlio_odometry"]["status"], "offline")
+        self.assertIn("检查完成", window._summary_check_status_label.text())
+
+    def test_start_summary_recording_runs_source_check_first(self) -> None:
+        window = MainWindow()
+        calls = []
+        original = window._check_summary_sources
+
+        def wrapped():
+            calls.append("checked")
+            return original()
+
+        window._check_summary_sources = wrapped
+
+        with temp_dir() as tmp:
+            window._start_summary_recording(base_dir=tmp, timestamp="20260608_131500")
+            window._stop_summary_recording(save=False)
+
+        self.assertEqual(calls, ["checked"])
+
     def test_summary_recording_can_use_ros_odom_and_received_ros_imu_sources(self) -> None:
         window = MainWindow()
         window._summary_rows["encoder"]["source_combo"].setCurrentIndex(
@@ -352,6 +419,51 @@ class MainWindowReplayTests(unittest.TestCase):
             self.assertEqual(metadata["files"]["ros_active_imu"], "ros_active_imu.csv")
             self.assertEqual(metadata["files"]["ros_imu_aligned"], "ros_imu_merged_aligned.csv")
 
+    def test_summary_recording_writes_fastlio_and_akm_topic_files_from_ros_messages(self) -> None:
+        window = MainWindow()
+
+        with temp_dir() as tmp:
+            session_dir = window._start_summary_recording(
+                base_dir=tmp,
+                timestamp="20260608_130000",
+            )
+            window._on_ros_message(
+                {
+                    "topic": "/Odometry",
+                    "message_type": "nav_msgs/Odometry",
+                    "recv_time_epoch_s": 10.0,
+                    "message": {
+                        "header": {"stamp": {"secs": 1, "nsecs": 0}, "frame_id": "odom"},
+                        "child_frame_id": "base_link",
+                        "pose": {"pose": {"position": {"x": 1.0, "y": 2.0, "z": 0.0}, "orientation": {"z": 0.0, "w": 1.0}}},
+                        "twist": {"twist": {"linear": {"x": 0.4}, "angular": {"z": 0.1}}},
+                    },
+                }
+            )
+            window._on_ros_message(
+                {
+                    "topic": "/wheeltec/akm_state",
+                    "message_type": "turn_on_wheeltec_robot/AkmState",
+                    "recv_time_epoch_s": 10.01,
+                    "message": {
+                        "header": {"stamp": {"secs": 1, "nsecs": 10_000_000}, "frame_id": "base_link"},
+                        "seq_id": 1,
+                        "control_tick_us": 1000,
+                        "dt_us": 10000,
+                        "left_wheel_speed": 3.0,
+                        "right_wheel_speed": 3.1,
+                        "steering_angle": 0.2,
+                    },
+                }
+            )
+
+            window._stop_summary_recording(save=True)
+
+            self.assertTrue((session_dir / "fastlio_odometry.csv").exists())
+            self.assertTrue((session_dir / "akm_state.csv").exists())
+            self.assertTrue((session_dir / "raw" / "fastlio_odometry.csv").exists())
+            self.assertTrue((session_dir / "raw" / "akm_state.csv").exists())
+
     def test_radar_sync_checkbox_is_enabled_only_after_successful_connection_test(self) -> None:
         window = MainWindow()
         radar = FakeRadarClient()
@@ -384,6 +496,39 @@ class MainWindowReplayTests(unittest.TestCase):
 
         self.assertEqual(radar.started, ["20260424_153000"])
         self.assertEqual(radar.stopped, 1)
+
+    def test_summary_recording_parses_radar_outputs_into_raw_radar_directory(self) -> None:
+        window = MainWindow()
+        radar = FakeRadarClient()
+        window._radar_client = radar
+        window._test_summary_radar_connection()
+        window._summary_radar_sync_cb.setChecked(True)
+
+        with temp_dir() as tmp:
+            radar_output_dir = tmp / "radar_source"
+            radar_output_dir.mkdir()
+            radar_filename = "2026_04_24_15_30_00.bin"
+            (radar_output_dir / radar_filename).write_bytes(make_radar_big_frame())
+            radar_xml = tmp / "radar_config.xml"
+            radar_xml.write_text(
+                """
+                <配置>
+                  <扫描时间s>0.000352</扫描时间s>
+                  <扫频周期s>0.05</扫频周期s>
+                </配置>
+                """,
+                encoding="utf-8",
+            )
+            window._summary_radar_source_dir_edit.setText(str(radar_output_dir))
+            window._summary_radar_xml_path_edit.setText(str(radar_xml))
+
+            session_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260424_153000")
+            window._stop_summary_recording(save=True)
+
+            self.assertTrue((session_dir / "raw" / "radar" / "radar_recording.bin").exists())
+            self.assertTrue((session_dir / "raw" / "radar" / "radar_config.xml").exists())
+            self.assertTrue((session_dir / "raw" / "radar" / "radar_sweeps.csv").exists())
+            self.assertTrue((session_dir / "raw" / "radar" / "radar_complex.npz").exists())
 
     def test_summary_recording_does_not_touch_radar_when_sync_is_unchecked(self) -> None:
         window = MainWindow()
