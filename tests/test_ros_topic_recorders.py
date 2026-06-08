@@ -14,10 +14,13 @@ from ros_topic_recorders import (
     ODOMETRY_FIELDNAMES,
     POWER_VOLTAGE_FIELDNAMES,
     extract_header_stamp,
+    make_ros_odom_compat_recorder,
+    make_ros_imu_compat_recorder,
     make_odometry_recorder,
     make_power_voltage_recorder,
     make_ros_imu_recorder,
     RosTopicMonitor,
+    sample_ros_topic,
 )
 
 
@@ -80,6 +83,87 @@ class RosTopicMonitorTests(unittest.TestCase):
         self.assertAlmostEqual(result.estimated_hz, 100.0, places=3)
         self.assertTrue(result.has_header_stamp)
         self.assertEqual(result.status, "ok")
+
+    def test_sample_ros_topic_uses_real_subscription_and_unsubscribes(self) -> None:
+        class FakeRos:
+            def __init__(self, host: str, port: int) -> None:
+                self.host = host
+                self.port = port
+                self.closed = False
+
+            def run(self) -> None:
+                pass
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakeTopic:
+            instances: list["FakeTopic"] = []
+
+            def __init__(self, _ros, name: str, message_type: str) -> None:
+                self.name = name
+                self.message_type = message_type
+                self.unsubscribed = False
+                FakeTopic.instances.append(self)
+
+            def subscribe(self, callback) -> None:
+                callback({"header": {"stamp": {"secs": 1, "nsecs": 0}, "frame_id": "odom"}})
+                callback({"header": {"stamp": {"secs": 1, "nsecs": 100_000_000}, "frame_id": "odom"}})
+
+            def unsubscribe(self) -> None:
+                self.unsubscribed = True
+
+        result = sample_ros_topic(
+            host="robot.local",
+            port=9090,
+            topic="/odom",
+            expected_type="nav_msgs/Odometry",
+            sample_seconds=0.0,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            time_fn=(value for value in [10.0, 10.1]).__next__,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.messages_received, 2)
+        self.assertAlmostEqual(result.estimated_hz, 10.0)
+        self.assertTrue(result.has_header_stamp)
+        self.assertTrue(FakeTopic.instances[0].unsubscribed)
+
+    def test_sample_ros_topic_reports_offline_when_no_messages_arrive(self) -> None:
+        class FakeRos:
+            def __init__(self, _host: str, _port: int) -> None:
+                pass
+
+            def run(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        class FakeTopic:
+            def __init__(self, *_args) -> None:
+                pass
+
+            def subscribe(self, _callback) -> None:
+                pass
+
+            def unsubscribe(self) -> None:
+                pass
+
+        result = sample_ros_topic(
+            host="robot.local",
+            port=9090,
+            topic="/missing",
+            expected_type="std_msgs/String",
+            sample_seconds=0.0,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.status, "offline")
+        self.assertEqual(result.messages_received, 0)
 
 
 class RosTopicRecorderTests(unittest.TestCase):
@@ -155,6 +239,47 @@ class RosTopicRecorderTests(unittest.TestCase):
             self.assertEqual(rows[0]["voltage"], "24.5")
             self.assertEqual(rows[0]["session_id"], "session_3")
             self.assertEqual(list(rows[0].keys()), POWER_VOLTAGE_FIELDNAMES)
+
+    def test_ros_odom_compat_recorder_keeps_old_columns_first(self) -> None:
+        with temp_dir() as tmp:
+            path = tmp / "ros_odom.csv"
+            recorder = make_ros_odom_compat_recorder(path, RecordingClock(session_id="session_4"))
+            recorder.write_message(
+                {
+                    "header": {"stamp": {"secs": 10, "nsecs": 0}, "frame_id": "odom"},
+                    "pose": {"pose": {"position": {"x": 1.0}, "orientation": {"w": 1.0}}},
+                    "twist": {"twist": {"linear": {"x": 0.2}, "angular": {"z": 0.3}}},
+                },
+                recv_time_epoch_s=20.0,
+            )
+            recorder.close()
+
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                header = next(csv.reader(handle))
+
+            self.assertEqual(header[0], "time_s")
+            self.assertEqual(header[-3:], ["ros_time", "recv_time", "frame_id"])
+
+    def test_ros_imu_compat_recorder_keeps_old_columns_first(self) -> None:
+        with temp_dir() as tmp:
+            path = tmp / "ros_imu.csv"
+            recorder = make_ros_imu_compat_recorder(path, RecordingClock(session_id="session_5"))
+            recorder.write_message(
+                {
+                    "header": {"stamp": {"secs": 11, "nsecs": 0}, "frame_id": "imu"},
+                    "linear_acceleration": {"x": 1.0},
+                    "angular_velocity": {"z": 2.0},
+                    "orientation": {"w": 1.0},
+                },
+                recv_time_epoch_s=21.0,
+            )
+            recorder.close()
+
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                header = next(csv.reader(handle))
+
+            self.assertEqual(header[0], "time_s")
+            self.assertEqual(header[-3:], ["ros_time", "recv_time", "frame_id"])
 
 
 if __name__ == "__main__":

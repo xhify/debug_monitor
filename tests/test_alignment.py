@@ -39,8 +39,10 @@ class AlignmentTests(unittest.TestCase):
             raw_dir = tmp / "raw"
             aligned_dir = tmp / "aligned"
             raw_dir.mkdir()
+            radar_dir = raw_dir / "radar"
+            radar_dir.mkdir()
             write_csv(
-                raw_dir / "fastlio_odometry.csv",
+                raw_dir / "trajectory_odometry.csv",
                 ["ros_time", "session_elapsed_s", "position_x", "position_y", "position_z", "orientation_z", "orientation_w"],
                 [
                     {"ros_time": 1.0, "session_elapsed_s": 0.10, "position_x": 1.0, "position_y": 2.0, "position_z": 0.0, "orientation_z": 0.0, "orientation_w": 1.0},
@@ -72,11 +74,35 @@ class AlignmentTests(unittest.TestCase):
                 ],
             )
             write_csv(
-                raw_dir / "radar_sweeps.csv",
-                ["radar_global_sweep_index", "radar_session_elapsed_s"],
+                radar_dir / "radar_sweeps.csv",
+                ["radar_global_sweep_index", "radar_session_elapsed_s", "radar_relative_time_s", "sample_count"],
                 [
-                    {"radar_global_sweep_index": 5, "radar_session_elapsed_s": 0.11},
-                    {"radar_global_sweep_index": 6, "radar_session_elapsed_s": 0.21},
+                    {"radar_global_sweep_index": 5, "radar_session_elapsed_s": 0.11, "radar_relative_time_s": 0.01, "sample_count": 220},
+                    {"radar_global_sweep_index": 6, "radar_session_elapsed_s": 0.21, "radar_relative_time_s": 0.02, "sample_count": 220},
+                ],
+            )
+            write_csv(
+                raw_dir / "ros_odom.csv",
+                ["time_s", "position_x", "position_y", "linear_x"],
+                [
+                    {"time_s": 0.10, "position_x": 9.0, "position_y": 8.0, "linear_x": 0.7},
+                    {"time_s": 0.20, "position_x": 10.0, "position_y": 9.0, "linear_x": 0.8},
+                ],
+            )
+            write_csv(
+                raw_dir / "ros_imu.csv",
+                ["time_s", "linear_acceleration_x", "angular_velocity_z"],
+                [
+                    {"time_s": 0.10, "linear_acceleration_x": 0.1, "angular_velocity_z": 0.2},
+                    {"time_s": 0.20, "linear_acceleration_x": 0.3, "angular_velocity_z": 0.4},
+                ],
+            )
+            write_csv(
+                raw_dir / "ros_active_imu.csv",
+                ["time_s", "linear_acceleration_x", "angular_velocity_z"],
+                [
+                    {"time_s": 0.10, "linear_acceleration_x": 0.5, "angular_velocity_z": 0.6},
+                    {"time_s": 0.20, "linear_acceleration_x": 0.7, "angular_velocity_z": 0.8},
                 ],
             )
 
@@ -90,6 +116,10 @@ class AlignmentTests(unittest.TestCase):
                 chassis_rows = list(csv.DictReader(handle))
             self.assertEqual(trajectory_rows[0]["akm_left_wheel_speed"], "3.0")
             self.assertEqual(trajectory_rows[0]["radar_global_sweep_index"], "5")
+            self.assertEqual(trajectory_rows[0]["radar_sample_count"], "220")
+            self.assertEqual(trajectory_rows[0]["ros_odom_x"], "9.0")
+            self.assertEqual(trajectory_rows[0]["ros_imu_gyro_z"], "0.2")
+            self.assertEqual(trajectory_rows[0]["ros_active_imu_accel_x"], "0.5")
             self.assertEqual(chassis_rows[0]["trajectory_x"], "1.0")
             self.assertEqual(chassis_rows[0]["packet_drop_count"], "1")
             self.assertEqual(outputs["trajectory_rows"], 2)

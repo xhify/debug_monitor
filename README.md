@@ -346,3 +346,14 @@ debug_monitor/
 - `radar_sweeps.csv`
 - `radar_complex.npz`
 - `radar_metadata.json`
+## 汇总记录包行为说明
+
+汇总页的“检查可记录数据源”会通过 ROSbridge 对已勾选的 ROS topic 做真实短时订阅采样，而不是用缓存快照或模拟消息判断。检查结果会记录到 `session.json` 的 `source_check_results`、`estimated_topic_hz`、`warnings` 和 `errors` 字段；开始记录前如存在 `offline` 或 `error` 的已勾选数据源，会阻止启动。
+
+默认情况下所有可记录源保持勾选。串口/ROS 的设备来源下拉框只影响对应设备面板和元数据，勾选的 ROS topic 会独立记录：`/odom` 写入 `ros_odom.csv`，`/imu` 写入 `ros_imu.csv`，`/active_imu` 写入 `ros_active_imu.csv`。这些兼容 CSV 保留旧列顺序，并在末尾追加 `ros_time`、`recv_time`、`frame_id`。
+
+轨迹主 topic 由汇总页“轨迹主话题”配置统一决定，用于检查、录制和对齐。轨迹数据稳定输出为 `trajectory_odometry.csv`；当主 topic 为默认 `/Odometry` 时，同时保留 legacy `fastlio_odometry.csv`。
+
+雷达解析结果位于 `raw/radar/`，包括 `radar_recording.bin`、`radar_config.xml`、`radar_sweeps.csv`、`radar_complex.npz`、`radar_timeline.csv` 和 `radar_metadata.json`。对齐流程读取 `raw/radar/radar_sweeps.csv`，并把最近邻雷达、`/odom`、`/imu`、`/active_imu` 字段写入 `aligned/trajectory_aligned.csv` 与 `aligned/chassis_100hz_aligned.csv`。
+
+保存后会生成 `manifest.json` 和同名 `.zip` 包。目录中的 `manifest.json` 与 zip 内的 `manifest.json` 保持一致，`session.json` 会补充生成文件、manifest 和 zip 路径。汇总页提供“取消本次记录”和“打开目录”按钮，取消会停止当前 session 并丢弃本次汇总记录。

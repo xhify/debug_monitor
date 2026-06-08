@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Callable
 
 from recording_clock import RecordingClock
+from ros_data import ROS_IMU_RAW_HEADER, ROS_SUMMARY_ODOM_HEADER
 
 
 ODOMETRY_FIELDNAMES = [
@@ -163,6 +165,53 @@ class RosTopicMonitor:
         )
 
 
+def sample_ros_topic(
+    host: str,
+    port: int,
+    topic: str,
+    expected_type: str,
+    *,
+    sample_seconds: float = 2.0,
+    required_fields: tuple[str, ...] = (),
+    warning_hz_below: float | None = None,
+    ros_factory=None,
+    topic_factory=None,
+    time_fn: Callable[[], float] = time.time,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> RosTopicCheckResult:
+    """临时订阅一个 ROS topic，并用真实消息估计在线状态和频率。"""
+
+    if ros_factory is None or topic_factory is None:
+        import roslibpy
+
+        ros_factory = ros_factory or roslibpy.Ros
+        topic_factory = topic_factory or roslibpy.Topic
+
+    monitor = RosTopicMonitor(
+        topic=topic,
+        expected_type=expected_type,
+        required_fields=required_fields,
+        warning_hz_below=warning_hz_below,
+    )
+    ros = ros_factory(host, int(port))
+    ros.run()
+    topic_obj = topic_factory(ros, topic, expected_type)
+
+    def _on_message(message: dict) -> None:
+        monitor.observe(message, expected_type, time_fn())
+
+    try:
+        topic_obj.subscribe(_on_message)
+        if sample_seconds > 0:
+            sleep_fn(float(sample_seconds))
+    finally:
+        try:
+            topic_obj.unsubscribe()
+        finally:
+            ros.close()
+    return monitor.result()
+
+
 class RosTopicCsvRecorder:
     """通用 ROS CSV 记录器。"""
 
@@ -202,6 +251,14 @@ def make_ros_imu_recorder(path: Path, clock: RecordingClock) -> RosTopicCsvRecor
 
 def make_power_voltage_recorder(path: Path, clock: RecordingClock) -> RosTopicCsvRecorder:
     return RosTopicCsvRecorder(path, POWER_VOLTAGE_FIELDNAMES, clock, _build_power_voltage_row)
+
+
+def make_ros_odom_compat_recorder(path: Path, clock: RecordingClock) -> RosTopicCsvRecorder:
+    return RosTopicCsvRecorder(path, ROS_SUMMARY_ODOM_HEADER, clock, _build_ros_odom_compat_row)
+
+
+def make_ros_imu_compat_recorder(path: Path, clock: RecordingClock) -> RosTopicCsvRecorder:
+    return RosTopicCsvRecorder(path, ROS_IMU_RAW_HEADER, clock, _build_ros_imu_compat_row)
 
 
 def _record_fields(clock: RecordingClock, recv_time_epoch_s: float | None) -> dict[str, object]:
@@ -274,4 +331,51 @@ def _build_power_voltage_row(message: dict, clock: RecordingClock, recv_time_epo
         "recv_time_epoch_s": record["recv_time_epoch_s"],
         "session_elapsed_s": record["session_elapsed_s"],
         "session_id": record["session_id"],
+    }
+
+
+def _build_ros_odom_compat_row(message: dict, clock: RecordingClock, recv_time_epoch_s: float | None) -> dict[str, object]:
+    odom = _build_odometry_row(message, clock, recv_time_epoch_s)
+    record = _record_fields(clock, recv_time_epoch_s)
+    return {
+        "time_s": record["session_elapsed_s"],
+        "frame_count": "",
+        "motor_a_left_speed": odom["linear_x"],
+        "motor_b_right_speed": odom["linear_y"],
+        "angular_z": odom["angular_z"],
+        "pose_x": odom["position_x"],
+        "pose_y": odom["position_y"],
+        "pose_z": odom["position_z"],
+        "orientation_x": odom["orientation_x"],
+        "orientation_y": odom["orientation_y"],
+        "orientation_z": odom["orientation_z"],
+        "orientation_w": odom["orientation_w"],
+        "ros_time": odom["ros_time"],
+        "recv_time": record["recv_time_epoch_s"],
+        "frame_id": odom["frame_id"],
+    }
+
+
+def _build_ros_imu_compat_row(message: dict, clock: RecordingClock, recv_time_epoch_s: float | None) -> dict[str, object]:
+    imu = _build_imu_row(message, clock, recv_time_epoch_s)
+    record = _record_fields(clock, recv_time_epoch_s)
+    return {
+        "time_s": record["session_elapsed_s"],
+        "frame_count": "",
+        "accel_x": imu["accel_x"],
+        "accel_y": imu["accel_y"],
+        "accel_z": imu["accel_z"],
+        "gyro_x": imu["gyro_x"],
+        "gyro_y": imu["gyro_y"],
+        "gyro_z": imu["gyro_z"],
+        "orientation_x": imu["orientation_x"],
+        "orientation_y": imu["orientation_y"],
+        "orientation_z": imu["orientation_z"],
+        "orientation_w": imu["orientation_w"],
+        "roll_deg": "",
+        "pitch_deg": "",
+        "yaw_deg": "",
+        "ros_time": imu["ros_time"],
+        "recv_time": record["recv_time_epoch_s"],
+        "frame_id": imu["frame_id"],
     }

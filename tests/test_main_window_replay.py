@@ -6,6 +6,7 @@ import unittest
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from PySide6.QtWidgets import QApplication
 
@@ -90,6 +91,18 @@ def make_radar_big_frame(offset: int = 0) -> bytes:
     body = iq_values.tobytes()
     footer = bytes(4)
     return bytes(header) + body + footer
+
+
+def allow_summary_source_checks(window: MainWindow) -> None:
+    window._check_summary_sources = lambda: {
+        "mock": {
+            "status": "ok",
+            "estimated_hz": 100.0,
+            "has_header_stamp": True,
+            "messages_received": 3,
+            "notes": "test source ready",
+        }
+    }
 
 
 class MainWindowReplayTests(unittest.TestCase):
@@ -276,6 +289,7 @@ class MainWindowReplayTests(unittest.TestCase):
 
     def test_summary_recording_writes_encoder_and_imu_files_to_one_directory(self) -> None:
         window = MainWindow()
+        allow_summary_source_checks(window)
         with temp_dir() as tmp:
             window._summary_note_edit.setPlainText("室内地面，低速直线，PWM 3000")
             session_dir = window._start_summary_recording(
@@ -341,6 +355,13 @@ class MainWindowReplayTests(unittest.TestCase):
 
     def test_check_summary_sources_reports_offline_when_ros_and_serial_are_unavailable(self) -> None:
         window = MainWindow()
+        window._sample_ros_topic = lambda **kwargs: SimpleNamespace(
+            status="offline",
+            estimated_hz=0.0,
+            has_header_stamp=False,
+            messages_received=0,
+            notes="ROS 未连接",
+        )
 
         result = window._check_summary_sources()
 
@@ -352,11 +373,18 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_start_summary_recording_runs_source_check_first(self) -> None:
         window = MainWindow()
         calls = []
-        original = window._check_summary_sources
 
         def wrapped():
             calls.append("checked")
-            return original()
+            return {
+                "mock": {
+                    "status": "ok",
+                    "estimated_hz": 100.0,
+                    "has_header_stamp": True,
+                    "messages_received": 3,
+                    "notes": "test source ready",
+                }
+            }
 
         window._check_summary_sources = wrapped
 
@@ -366,8 +394,27 @@ class MainWindowReplayTests(unittest.TestCase):
 
         self.assertEqual(calls, ["checked"])
 
+    def test_start_summary_recording_blocks_when_checked_source_is_offline(self) -> None:
+        window = MainWindow()
+        window._check_summary_sources = lambda: {
+            "fastlio_odometry": {
+                "status": "offline",
+                "estimated_hz": 0.0,
+                "has_header_stamp": False,
+                "messages_received": 0,
+                "notes": "ROS 未连接",
+            }
+        }
+
+        with temp_dir() as tmp:
+            with self.assertRaises(RuntimeError):
+                window._start_summary_recording(base_dir=tmp, timestamp="20260608_140000")
+
+            self.assertFalse(any(tmp.iterdir()))
+
     def test_summary_recording_can_use_ros_odom_and_received_ros_imu_sources(self) -> None:
         window = MainWindow()
+        allow_summary_source_checks(window)
         window._summary_rows["encoder"]["source_combo"].setCurrentIndex(
             window._summary_rows["encoder"]["source_combo"].findData("ros_odom")
         )
@@ -406,7 +453,6 @@ class MainWindowReplayTests(unittest.TestCase):
             self.assertTrue((session_dir / "ros_odom.csv").exists())
             self.assertTrue((session_dir / "ros_imu.csv").exists())
             self.assertTrue((session_dir / "ros_active_imu.csv").exists())
-            self.assertTrue((session_dir / "ros_imu_merged_aligned.csv").exists())
             self.assertFalse((session_dir / "encoder.csv").exists())
             self.assertFalse((session_dir / "imu_A.csv").exists())
             with (session_dir / "session.json").open("r", encoding="utf-8") as fh:
@@ -417,10 +463,10 @@ class MainWindowReplayTests(unittest.TestCase):
             self.assertEqual(metadata["files"]["ros_odom"], "ros_odom.csv")
             self.assertEqual(metadata["files"]["ros_imu"], "ros_imu.csv")
             self.assertEqual(metadata["files"]["ros_active_imu"], "ros_active_imu.csv")
-            self.assertEqual(metadata["files"]["ros_imu_aligned"], "ros_imu_merged_aligned.csv")
 
     def test_summary_recording_writes_fastlio_and_akm_topic_files_from_ros_messages(self) -> None:
         window = MainWindow()
+        allow_summary_source_checks(window)
 
         with temp_dir() as tmp:
             session_dir = window._start_summary_recording(
@@ -459,8 +505,10 @@ class MainWindowReplayTests(unittest.TestCase):
 
             window._stop_summary_recording(save=True)
 
+            self.assertTrue((session_dir / "trajectory_odometry.csv").exists())
             self.assertTrue((session_dir / "fastlio_odometry.csv").exists())
             self.assertTrue((session_dir / "akm_state.csv").exists())
+            self.assertTrue((session_dir / "raw" / "trajectory_odometry.csv").exists())
             self.assertTrue((session_dir / "raw" / "fastlio_odometry.csv").exists())
             self.assertTrue((session_dir / "raw" / "akm_state.csv").exists())
 
@@ -485,6 +533,7 @@ class MainWindowReplayTests(unittest.TestCase):
 
     def test_summary_recording_starts_and_stops_radar_when_sync_is_checked(self) -> None:
         window = MainWindow()
+        allow_summary_source_checks(window)
         radar = FakeRadarClient()
         window._radar_client = radar
         window._test_summary_radar_connection()
@@ -499,6 +548,7 @@ class MainWindowReplayTests(unittest.TestCase):
 
     def test_summary_recording_parses_radar_outputs_into_raw_radar_directory(self) -> None:
         window = MainWindow()
+        allow_summary_source_checks(window)
         radar = FakeRadarClient()
         window._radar_client = radar
         window._test_summary_radar_connection()
@@ -532,6 +582,7 @@ class MainWindowReplayTests(unittest.TestCase):
 
     def test_summary_recording_does_not_touch_radar_when_sync_is_unchecked(self) -> None:
         window = MainWindow()
+        allow_summary_source_checks(window)
         radar = FakeRadarClient()
         window._radar_client = radar
 
@@ -544,6 +595,7 @@ class MainWindowReplayTests(unittest.TestCase):
 
     def test_summary_recording_aborts_when_checked_radar_start_fails(self) -> None:
         window = MainWindow()
+        allow_summary_source_checks(window)
         radar = FakeRadarClient(fail_start=True)
         window._radar_client = radar
         window._summary_radar_sync_cb.setEnabled(True)

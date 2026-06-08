@@ -55,6 +55,7 @@ def parse_radar_recording(
     radar_start_session_elapsed_s: float,
     host_start_epoch_s: float,
     host_stop_epoch_s: float,
+    radar_stop_session_elapsed_s: float | None = None,
 ) -> dict[str, object]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +65,10 @@ def parse_radar_recording(
     xml_info = parse_radar_xml(xml_path)
     scan_time_s = float(xml_info.get("scan_time_s", 0.0))
     sweep_period_s = float(xml_info.get("sweep_period_s", 0.0))
+    if sweep_period_s <= 0.0:
+        if scan_time_s <= 0.0:
+            raise ValueError("invalid sweep_period_s")
+        sweep_period_s = scan_time_s
     one_sweep_points = int(floor(scan_time_s / 176e-6) * 220)
     if one_sweep_points <= 0:
         raise ValueError("invalid oneSweepADPoints")
@@ -154,7 +159,11 @@ def parse_radar_recording(
             {
                 "event": "stop",
                 "host_time_epoch_s": host_stop_epoch_s,
-                "session_elapsed_s": radar_start_session_elapsed_s + max(0.0, (global_sweep_index - 1) * sweep_period_s),
+                "session_elapsed_s": (
+                    radar_stop_session_elapsed_s
+                    if radar_stop_session_elapsed_s is not None
+                    else radar_start_session_elapsed_s + max(0.0, (global_sweep_index - 1) * sweep_period_s)
+                ),
                 "filename": "radar_recording.bin",
             }
         )
@@ -163,6 +172,12 @@ def parse_radar_recording(
     metadata.update(
         {
             "session_id": session_id,
+            "host_start_epoch_s": host_start_epoch_s,
+            "host_stop_epoch_s": host_stop_epoch_s,
+            "radar_start_session_elapsed_s": radar_start_session_elapsed_s,
+            "radar_stop_session_elapsed_s": radar_stop_session_elapsed_s,
+            "scan_time_s": scan_time_s,
+            "sweep_period_s": sweep_period_s,
             "frame_count": frame_count,
             "total_sweeps": int(global_sweep_index),
             "one_sweep_points": one_sweep_points,

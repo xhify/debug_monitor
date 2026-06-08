@@ -88,6 +88,7 @@ class RadarBinParserTests(unittest.TestCase):
                 radar_start_session_elapsed_s=1.5,
                 host_start_epoch_s=10.0,
                 host_stop_epoch_s=10.5,
+                radar_stop_session_elapsed_s=2.75,
             )
 
             self.assertEqual(result["one_sweep_points"], 440)
@@ -100,7 +101,12 @@ class RadarBinParserTests(unittest.TestCase):
             with (output_dir / "radar_metadata.json").open("r", encoding="utf-8") as handle:
                 metadata = json.load(handle)
             self.assertEqual(metadata["one_sweep_points"], 440)
+            self.assertEqual(metadata["radar_stop_session_elapsed_s"], 2.75)
             self.assertTrue((output_dir / "radar_timeline.csv").exists())
+            with (output_dir / "radar_timeline.csv").open("r", encoding="utf-8", newline="") as handle:
+                timeline = list(csv.DictReader(handle))
+            self.assertEqual(timeline[-1]["event"], "stop")
+            self.assertEqual(timeline[-1]["session_elapsed_s"], "2.75")
 
 
 if __name__ == "__main__":

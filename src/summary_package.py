@@ -36,6 +36,7 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
     aligned_dir = session_dir / "aligned"
     raw_dir.mkdir(exist_ok=True)
     aligned_dir.mkdir(exist_ok=True)
+    package_zip = session_dir / f"{session_dir.name}.zip"
 
     source_session = {}
     session_json_path = session_dir / "session.json"
@@ -45,8 +46,8 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
 
     generated_files: list[str] = []
     row_counts: dict[str, int] = {}
-    warnings: list[str] = []
-    errors: list[str] = []
+    warnings: list[str] = list(source_session.get("warnings", []))
+    errors: list[str] = list(source_session.get("errors", []))
 
     for source_name, raw_name in RAW_FILE_MAP.items():
         source_path = session_dir / source_name
@@ -79,6 +80,17 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
                 generated_files.append(str(path.relative_to(session_dir)).replace("\\", "/"))
                 row_counts[name] = _count_csv_rows(path)
 
+    for relative in ("session.json", "manifest.json", package_zip.name):
+        if relative not in generated_files:
+            generated_files.append(relative)
+
+    if session_json_path.exists():
+        source_session["generated_files"] = generated_files
+        source_session["package_zip"] = str(package_zip)
+        source_session["manifest_path"] = "manifest.json"
+        with session_json_path.open("w", encoding="utf-8") as handle:
+            json.dump(source_session, handle, ensure_ascii=False, indent=2)
+
     manifest = {
         "session_id": source_session.get("session_id", session_dir.name),
         "started_at_iso": source_session.get("started_at_iso", source_session.get("started_at", "")),
@@ -89,20 +101,14 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
         "estimated_topic_hz": source_session.get("estimated_topic_hz", {}),
         "warnings": warnings,
         "errors": errors,
-        "package_zip": "",
+        "package_zip": str(package_zip),
         "alignment": alignment_stats,
     }
     manifest_path = session_dir / "manifest.json"
     with manifest_path.open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
 
-    package_zip = session_dir / f"{session_dir.name}.zip"
     _write_zip(package_zip, session_dir)
-    generated_files.append(package_zip.name)
-    manifest["package_zip"] = str(package_zip)
-    manifest["generated_files"] = generated_files
-    with manifest_path.open("w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, ensure_ascii=False, indent=2)
 
     return manifest
 
