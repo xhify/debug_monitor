@@ -91,6 +91,11 @@ class SummaryPackageTests(unittest.TestCase):
             self.assertEqual(manifest["session_id"], "session_20260608_120000")
             self.assertEqual(manifest["row_counts"]["serial_encoder.csv"], 1)
             self.assertIn("aligned/trajectory_aligned.csv", manifest["generated_files"])
+            self.assertIn("timings_s", manifest)
+            self.assertIn("copy_raw", manifest["timings_s"])
+            self.assertIn("alignment", manifest["timings_s"])
+            self.assertIn("zip", manifest["timings_s"])
+            self.assertEqual(result["timings_s"], manifest["timings_s"])
             with zipfile.ZipFile(session_dir / "session_20260608_120000.zip") as archive:
                 names = set(archive.namelist())
                 zipped_manifest = json.loads(archive.read("manifest.json").decode("utf-8"))

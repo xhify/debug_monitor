@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from alignment import write_alignment_outputs
+import alignment
 
 
 TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / ".test_tmp"
@@ -83,26 +84,26 @@ class AlignmentTests(unittest.TestCase):
             )
             write_csv(
                 raw_dir / "ros_odom.csv",
-                ["time_s", "position_x", "position_y", "linear_x"],
+                ["time_s", "pose_x", "pose_y", "motor_a_left_speed", "angular_z", "position_x", "position_y", "linear_x"],
                 [
-                    {"time_s": 0.10, "position_x": 9.0, "position_y": 8.0, "linear_x": 0.7},
-                    {"time_s": 0.20, "position_x": 10.0, "position_y": 9.0, "linear_x": 0.8},
+                    {"time_s": 0.10, "pose_x": 9.0, "pose_y": 8.0, "motor_a_left_speed": 0.7, "angular_z": 0.03, "position_x": 90.0, "position_y": 80.0, "linear_x": 7.0},
+                    {"time_s": 0.20, "pose_x": "", "pose_y": "", "motor_a_left_speed": "", "angular_z": 0.04, "position_x": 10.0, "position_y": 9.0, "linear_x": 0.8},
                 ],
             )
             write_csv(
                 raw_dir / "ros_imu.csv",
-                ["time_s", "linear_acceleration_x", "angular_velocity_z"],
+                ["time_s", "accel_x", "gyro_z", "linear_acceleration_x", "angular_velocity_z"],
                 [
-                    {"time_s": 0.10, "linear_acceleration_x": 0.1, "angular_velocity_z": 0.2},
-                    {"time_s": 0.20, "linear_acceleration_x": 0.3, "angular_velocity_z": 0.4},
+                    {"time_s": 0.10, "accel_x": 0.1, "gyro_z": 0.2, "linear_acceleration_x": 1.1, "angular_velocity_z": 1.2},
+                    {"time_s": 0.20, "accel_x": "", "gyro_z": "", "linear_acceleration_x": 0.3, "angular_velocity_z": 0.4},
                 ],
             )
             write_csv(
                 raw_dir / "ros_active_imu.csv",
-                ["time_s", "linear_acceleration_x", "angular_velocity_z"],
+                ["time_s", "accel_x", "gyro_z", "linear_acceleration_x", "angular_velocity_z"],
                 [
-                    {"time_s": 0.10, "linear_acceleration_x": 0.5, "angular_velocity_z": 0.6},
-                    {"time_s": 0.20, "linear_acceleration_x": 0.7, "angular_velocity_z": 0.8},
+                    {"time_s": 0.10, "accel_x": 0.5, "gyro_z": 0.6, "linear_acceleration_x": 5.5, "angular_velocity_z": 5.6},
+                    {"time_s": 0.20, "accel_x": "", "gyro_z": "", "linear_acceleration_x": 0.7, "angular_velocity_z": 0.8},
                 ],
             )
 
@@ -118,12 +119,136 @@ class AlignmentTests(unittest.TestCase):
             self.assertEqual(trajectory_rows[0]["radar_global_sweep_index"], "5")
             self.assertEqual(trajectory_rows[0]["radar_sample_count"], "220")
             self.assertEqual(trajectory_rows[0]["ros_odom_x"], "9.0")
+            self.assertEqual(trajectory_rows[0]["ros_odom_y"], "8.0")
+            self.assertEqual(trajectory_rows[0]["ros_odom_linear_x"], "0.7")
+            self.assertEqual(trajectory_rows[0]["ros_odom_angular_z"], "0.03")
             self.assertEqual(trajectory_rows[0]["ros_imu_gyro_z"], "0.2")
             self.assertEqual(trajectory_rows[0]["ros_active_imu_accel_x"], "0.5")
             self.assertEqual(chassis_rows[0]["trajectory_x"], "1.0")
             self.assertEqual(chassis_rows[0]["packet_drop_count"], "1")
+            self.assertEqual(chassis_rows[1]["ros_odom_x"], "10.0")
+            self.assertEqual(chassis_rows[1]["ros_odom_linear_x"], "0.8")
+            self.assertEqual(chassis_rows[1]["ros_imu_gyro_z"], "0.4")
+            self.assertEqual(chassis_rows[1]["ros_active_imu_accel_x"], "0.7")
             self.assertEqual(outputs["trajectory_rows"], 2)
             self.assertEqual(outputs["chassis_rows"], 2)
+
+    def test_alignment_uses_indexed_nearest_lookup_for_large_inputs(self) -> None:
+        with temp_dir() as tmp:
+            raw_dir = tmp / "raw"
+            aligned_dir = tmp / "aligned"
+            raw_dir.mkdir()
+            radar_dir = raw_dir / "radar"
+            radar_dir.mkdir()
+            row_count = 200
+
+            write_csv(
+                raw_dir / "trajectory_odometry.csv",
+                ["ros_time", "session_elapsed_s", "position_x", "position_y", "position_z", "orientation_z", "orientation_w"],
+                [
+                    {
+                        "ros_time": 1000.0 + index * 0.01,
+                        "session_elapsed_s": index * 0.01,
+                        "position_x": index,
+                        "position_y": index,
+                        "position_z": 0.0,
+                        "orientation_z": 0.0,
+                        "orientation_w": 1.0,
+                    }
+                    for index in range(row_count)
+                ],
+            )
+            write_csv(
+                raw_dir / "akm_state.csv",
+                ["ros_time", "session_elapsed_s", "seq_id", "control_tick_us", "dt_us", "left_wheel_speed", "right_wheel_speed", "steering_angle"],
+                [
+                    {
+                        "ros_time": 1000.0 + index * 0.01 + 0.001,
+                        "session_elapsed_s": index * 0.01 + 0.001,
+                        "seq_id": index,
+                        "control_tick_us": index,
+                        "dt_us": 10000,
+                        "left_wheel_speed": 1.0,
+                        "right_wheel_speed": 1.0,
+                        "steering_angle": 0.0,
+                    }
+                    for index in range(row_count)
+                ],
+            )
+            write_csv(
+                raw_dir / "control_debug.csv",
+                ["ros_time", "session_elapsed_s", "target_vx", "motor_left_pwm"],
+                [
+                    {"ros_time": 1000.0 + index * 0.01 + 0.002, "session_elapsed_s": index * 0.01 + 0.002, "target_vx": 0.5, "motor_left_pwm": 100}
+                    for index in range(row_count)
+                ],
+            )
+            write_csv(
+                raw_dir / "chassis_diagnostics.csv",
+                ["ros_time", "session_elapsed_s", "battery_voltage", "packet_drop_count", "checksum_error_count", "legacy_error_count", "command_timeout", "low_voltage", "steering_angle_valid"],
+                [
+                    {
+                        "ros_time": 1000.0 + index * 0.01 + 0.003,
+                        "session_elapsed_s": index * 0.01 + 0.003,
+                        "battery_voltage": 24.0,
+                        "packet_drop_count": 0,
+                        "checksum_error_count": 0,
+                        "legacy_error_count": 0,
+                        "command_timeout": 0,
+                        "low_voltage": 0,
+                        "steering_angle_valid": 1,
+                    }
+                    for index in range(row_count)
+                ],
+            )
+            write_csv(
+                radar_dir / "radar_sweeps.csv",
+                ["radar_global_sweep_index", "radar_session_elapsed_s", "radar_relative_time_s", "sample_count"],
+                [
+                    {"radar_global_sweep_index": index, "radar_session_elapsed_s": index * 0.02, "radar_relative_time_s": index * 0.02, "sample_count": 1}
+                    for index in range(row_count // 2)
+                ],
+            )
+            write_csv(
+                raw_dir / "ros_odom.csv",
+                ["time_s", "pose_x", "pose_y", "motor_a_left_speed", "angular_z", "position_x", "position_y", "linear_x"],
+                [
+                    {"time_s": index * 0.01, "pose_x": index, "pose_y": index, "motor_a_left_speed": 1.0, "angular_z": 0.0, "position_x": index, "position_y": index, "linear_x": 1.0}
+                    for index in range(row_count)
+                ],
+            )
+            write_csv(
+                raw_dir / "ros_imu.csv",
+                ["time_s", "accel_x", "gyro_z", "linear_acceleration_x", "angular_velocity_z"],
+                [
+                    {"time_s": index * 0.01, "accel_x": 0.0, "gyro_z": 0.0, "linear_acceleration_x": 0.0, "angular_velocity_z": 0.0}
+                    for index in range(row_count)
+                ],
+            )
+            write_csv(
+                raw_dir / "ros_active_imu.csv",
+                ["time_s", "accel_x", "gyro_z", "linear_acceleration_x", "angular_velocity_z"],
+                [
+                    {"time_s": index * 0.01, "accel_x": 0.0, "gyro_z": 0.0, "linear_acceleration_x": 0.0, "angular_velocity_z": 0.0}
+                    for index in range(row_count)
+                ],
+            )
+
+            original_float = alignment._float
+            call_count = 0
+
+            def counting_float(value: str | object) -> float | None:
+                nonlocal call_count
+                call_count += 1
+                return original_float(value)
+
+            try:
+                alignment._float = counting_float
+                write_alignment_outputs(raw_dir=raw_dir, aligned_dir=aligned_dir)
+            finally:
+                alignment._float = original_float
+
+            self.assertLess(call_count, 50_000)
 
 
 if __name__ == "__main__":

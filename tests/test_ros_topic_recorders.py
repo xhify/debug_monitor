@@ -21,6 +21,7 @@ from ros_topic_recorders import (
     make_ros_imu_recorder,
     RosTopicMonitor,
     sample_ros_topic,
+    sample_ros_topics,
 )
 
 
@@ -165,8 +166,152 @@ class RosTopicMonitorTests(unittest.TestCase):
         self.assertEqual(result.status, "offline")
         self.assertEqual(result.messages_received, 0)
 
+    def test_sample_ros_topics_subscribes_all_topics_in_one_sampling_window(self) -> None:
+        class FakeRos:
+            instances: list["FakeRos"] = []
+
+            def __init__(self, host: str, port: int) -> None:
+                self.host = host
+                self.port = port
+                self.closed = False
+                self.run_timeout = None
+                FakeRos.instances.append(self)
+
+            def run(self, timeout=None) -> None:
+                self.run_timeout = timeout
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakeTopic:
+            instances: list["FakeTopic"] = []
+
+            def __init__(self, _ros, name: str, message_type: str) -> None:
+                self.name = name
+                self.message_type = message_type
+                self.unsubscribed = False
+                FakeTopic.instances.append(self)
+
+            def subscribe(self, callback) -> None:
+                callback({"header": {"stamp": {"secs": 1, "nsecs": 0}, "frame_id": self.name}})
+
+            def unsubscribe(self) -> None:
+                self.unsubscribed = True
+
+        sleeps: list[float] = []
+        results = sample_ros_topics(
+            host="robot.local",
+            port=9090,
+            topic_specs=[
+                {"source_id": "odom", "topic": "/odom", "expected_type": "nav_msgs/Odometry"},
+                {"source_id": "imu", "topic": "/imu", "expected_type": "sensor_msgs/Imu"},
+            ],
+            sample_seconds=2.0,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            time_fn=(value for value in [10.0, 10.1]).__next__,
+            sleep_fn=lambda seconds: sleeps.append(seconds),
+            connection_timeout=3.0,
+        )
+
+        self.assertEqual(len(FakeRos.instances), 1)
+        self.assertEqual(FakeRos.instances[0].run_timeout, 3.0)
+        self.assertEqual(sleeps, [2.0])
+        self.assertEqual({topic.name for topic in FakeTopic.instances}, {"/odom", "/imu"})
+        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.instances))
+        self.assertEqual(results["odom"].messages_received, 1)
+        self.assertEqual(results["imu"].messages_received, 1)
+
 
 class RosTopicRecorderTests(unittest.TestCase):
+    def test_recorder_elapsed_uses_recv_time_epoch_when_provided(self) -> None:
+        with temp_dir() as tmp:
+            path = tmp / "ros_power_voltage.csv"
+            clock = RecordingClock(
+                session_id="session_recv",
+                start_epoch_s=1000.0,
+                start_perf_s=1.0,
+            )
+            recorder = make_power_voltage_recorder(path, clock)
+            recorder.write_message({"data": 24.5}, recv_time_epoch_s=1002.5)
+            recorder.close()
+
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(rows[0]["recv_time_epoch_s"], "1002.5")
+            self.assertEqual(rows[0]["session_elapsed_s"], "2.5")
+
+    def test_ros_odom_compat_recorder_fills_frame_count(self) -> None:
+        with temp_dir() as tmp:
+            path = tmp / "ros_odom.csv"
+            recorder = make_ros_odom_compat_recorder(path, RecordingClock(session_id="session_odom"))
+            message = {
+                "header": {"stamp": {"secs": 10, "nsecs": 0}, "frame_id": "odom"},
+                "pose": {"pose": {"position": {"x": 1.0}, "orientation": {"w": 1.0}}},
+                "twist": {"twist": {"linear": {"x": 0.2}, "angular": {"z": 0.3}}},
+            }
+            recorder.write_message(message, recv_time_epoch_s=20.0)
+            recorder.write_message(message, recv_time_epoch_s=20.1)
+            recorder.close()
+
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual([row["frame_count"] for row in rows], ["1", "2"])
+
+    def test_ros_imu_compat_recorder_fills_euler_angles(self) -> None:
+        with temp_dir() as tmp:
+            path = tmp / "ros_imu.csv"
+            recorder = make_ros_imu_compat_recorder(path, RecordingClock(session_id="session_imu"))
+            recorder.write_message(
+                {
+                    "header": {"stamp": {"secs": 11, "nsecs": 0}, "frame_id": "imu"},
+                    "linear_acceleration": {"x": 1.0},
+                    "angular_velocity": {"z": 2.0},
+                    "orientation": {"x": 0.0, "y": 0.0, "z": 0.7071068, "w": 0.7071068},
+                },
+                recv_time_epoch_s=21.0,
+            )
+            recorder.close()
+
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertNotEqual(rows[0]["roll_deg"], "")
+            self.assertNotEqual(rows[0]["pitch_deg"], "")
+            self.assertAlmostEqual(float(rows[0]["yaw_deg"]), 90.0, places=2)
+
+    def test_recorder_flushes_by_row_interval(self) -> None:
+        flushes: list[int] = []
+
+        class CountingHandle:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def write(self, _text: str) -> int:
+                return 0
+
+            def flush(self) -> None:
+                flushes.append(1)
+
+            def close(self) -> None:
+                self.closed = True
+
+        with temp_dir() as tmp:
+            path = tmp / "ros_power_voltage.csv"
+            recorder = make_power_voltage_recorder(path, RecordingClock(session_id="session_flush"))
+            handle = CountingHandle()
+            recorder._handle.close()
+            recorder._handle = handle
+            recorder._writer = csv.DictWriter(handle, fieldnames=recorder.fieldnames)
+
+            recorder.write_message({"data": 24.5}, recv_time_epoch_s=30.0)
+            recorder.write_message({"data": 24.6}, recv_time_epoch_s=30.1)
+            recorder.close()
+
+            self.assertEqual(len(flushes), 1)
+
     def test_odometry_recorder_writes_expected_fields(self) -> None:
         with temp_dir() as tmp:
             path = tmp / "fastlio_odometry.csv"

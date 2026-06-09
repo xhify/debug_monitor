@@ -348,7 +348,11 @@ debug_monitor/
 - `radar_metadata.json`
 ## 汇总记录包行为说明
 
-汇总页的“检查可记录数据源”会通过 ROSbridge 对已勾选的 ROS topic 做真实短时订阅采样，而不是用缓存快照或模拟消息判断。检查结果会记录到 `session.json` 的 `source_check_results`、`estimated_topic_hz`、`warnings` 和 `errors` 字段；开始记录前如存在 `offline` 或 `error` 的已勾选数据源，会阻止启动。
+汇总页的“检查可记录数据源”会在后台执行，并通过 ROSbridge 对已勾选的 ROS topic 做真实短时订阅采样，而不是用缓存快照或模拟消息判断。检查期间界面保持可响应，状态会显示 `CHECKING`；检查结果会记录到 `session.json` 的 `source_check_results`、`estimated_topic_hz`、`warnings` 和 `errors` 字段；开始记录前如存在 `offline` 或 `error` 的已勾选数据源，会阻止启动。
+
+点击“全部开始记录”时，程序会立即确定 `recording_start_epoch_s` / `recording_start_perf_s` 并打开 recording gate，然后再创建 session 目录、CSV recorder 和可选雷达录制。点击“全部停止记录”时，程序会立即确定 `recording_stop_epoch_s` / `recording_stop_perf_s` 并关闭 gate，之后再执行 CSV finalize、雷达解析、aligned CSV 生成和 zip 打包。这样可以避免 topic 检查或 UI/打包耗时影响真实记录窗口。
+
+ROS CSV 的 `session_elapsed_s` 由消息实际 `recv_time_epoch_s - recording_start_epoch_s` 计算得到，而不是由写入 CSV 的时刻计算。边界外 ROS 消息会被丢弃，并在 `session.json` 中累计 `dropped_pre_start_ros_messages` / `dropped_post_stop_ros_messages`。非 ROS 数据（例如雷达 `.bin`）使用 `session_elapsed_s` 与 ROS 数据做近似对齐。
 
 默认情况下所有可记录源保持勾选。串口/ROS 的设备来源下拉框只影响对应设备面板和元数据，勾选的 ROS topic 会独立记录：`/odom` 写入 `ros_odom.csv`，`/imu` 写入 `ros_imu.csv`，`/active_imu` 写入 `ros_active_imu.csv`。这些兼容 CSV 保留旧列顺序，并在末尾追加 `ros_time`、`recv_time`、`frame_id`。
 

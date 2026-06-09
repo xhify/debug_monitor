@@ -31,6 +31,9 @@ class RecordingClock:
     def elapsed_s(self) -> float:
         return max(0.0, time.perf_counter() - self.start_perf_s)
 
+    def elapsed_from_epoch(self, recv_time_epoch_s: float) -> float:
+        return max(0.0, float(recv_time_epoch_s) - self.start_epoch_s)
+
     def now_record_fields(self) -> dict[str, object]:
         return {
             "session_id": self.session_id,

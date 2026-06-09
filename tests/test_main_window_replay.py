@@ -1,4 +1,6 @@
 import os
+import csv
+import gc
 import json
 import shutil
 import sys
@@ -325,6 +327,20 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertGreaterEqual(imu_source.findData("serial"), 0)
         self.assertGreaterEqual(imu_source.findData("ros_imu"), 0)
 
+    def test_summary_ros_odom_status_counts_only_odom_topic_messages(self) -> None:
+        window = MainWindow()
+        window._summary_rows["encoder"]["source_combo"].setCurrentIndex(
+            window._summary_rows["encoder"]["source_combo"].findData("ros_odom")
+        )
+        window._on_ros_connection_changed(True)
+
+        for topic in ("/odom", "/imu", "/active_imu", "/PowerVoltage", "/wheeltec/akm_state"):
+            window._on_ros_message({"topic": topic, "message": {}, "recv_time_epoch_s": 1.0})
+
+        window._update_summary_status()
+
+        self.assertEqual(window._summary_rows["encoder"]["frame_label"].text(), "1")
+
     def test_summary_page_defaults_to_recordings_directory(self) -> None:
         window = MainWindow()
 
@@ -353,6 +369,43 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertTrue(hasattr(window, "_summary_radar_source_dir_edit"))
         self.assertTrue(hasattr(window, "_summary_radar_xml_path_edit"))
 
+    def test_background_task_retains_worker_until_completion(self) -> None:
+        window = MainWindow()
+        finished: list[object] = []
+        errors: list[str] = []
+
+        window._run_background_task(lambda: "ok", finished.append, errors.append)
+        gc.collect()
+
+        self.assertTrue(window._summary_background_workers)
+
+        for _ in range(100):
+            self.app.processEvents()
+            if (finished or errors) and not window._summary_background_workers:
+                break
+
+        self.assertEqual(finished, ["ok"])
+        self.assertFalse(errors)
+        self.assertFalse(window._summary_background_workers)
+
+    def test_summary_source_check_timeout_recovers_buttons_and_ignores_late_result(self) -> None:
+        window = MainWindow()
+        generation = 1
+        window._summary_check_generation = generation
+        window._set_summary_recording_state("CHECKING", "CHECKING")
+
+        window._on_summary_source_check_timeout(generation)
+
+        self.assertEqual(window._summary_recording_state, "ERROR")
+        self.assertTrue(window._summary_check_btn.isEnabled())
+        self.assertTrue(window._summary_record_btn.isEnabled())
+        self.assertIn("超时", window._summary_check_status_label.text())
+
+        window._on_summary_source_check_finished({"mock": {"status": "ok"}}, generation=generation)
+
+        self.assertEqual(window._summary_recording_state, "ERROR")
+        self.assertEqual(window._summary_last_check_results, {})
+
     def test_check_summary_sources_reports_offline_when_ros_and_serial_are_unavailable(self) -> None:
         window = MainWindow()
         window._sample_ros_topic = lambda **kwargs: SimpleNamespace(
@@ -366,8 +419,14 @@ class MainWindowReplayTests(unittest.TestCase):
         result = window._check_summary_sources()
 
         self.assertIn("serial_encoder", result)
+        self.assertEqual(result["serial_encoder"]["status"], "offline")
+        self.assertEqual(result["imu_A"]["status"], "offline")
+        self.assertEqual(result["imu_B"]["status"], "offline")
         self.assertIn("fastlio_odometry", result)
         self.assertEqual(result["fastlio_odometry"]["status"], "offline")
+        self.assertEqual(result["radar_bin"]["status"], "skipped")
+        self.assertIn("offline 11", window._summary_check_status_label.text())
+        self.assertIn("skipped 1", window._summary_check_status_label.text())
         self.assertIn("检查完成", window._summary_check_status_label.text())
 
     def test_start_summary_recording_runs_source_check_first(self) -> None:
@@ -511,6 +570,98 @@ class MainWindowReplayTests(unittest.TestCase):
             self.assertTrue((session_dir / "raw" / "trajectory_odometry.csv").exists())
             self.assertTrue((session_dir / "raw" / "fastlio_odometry.csv").exists())
             self.assertTrue((session_dir / "raw" / "akm_state.csv").exists())
+
+    def test_summary_ros_message_gate_drops_messages_outside_recording_window(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+
+        with temp_dir() as tmp:
+            session_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260609_101500")
+            start_epoch = window._summary_recording_start_epoch_s
+            self.assertIsNotNone(start_epoch)
+
+            base_message = {
+                "header": {"stamp": {"secs": 10, "nsecs": 0}, "frame_id": "odom"},
+                "pose": {"pose": {"position": {"x": 1.0}, "orientation": {"w": 1.0}}},
+                "twist": {"twist": {"linear": {"x": 0.2}, "angular": {"z": 0.3}}},
+            }
+            window._on_ros_message({"topic": "/odom", "message": base_message, "recv_time_epoch_s": start_epoch - 0.5})
+            window._on_ros_message({"topic": "/odom", "message": base_message, "recv_time_epoch_s": start_epoch + 0.5})
+            window._summary_recording_stop_epoch_s = start_epoch + 1.0
+            window._summary_recording_gate_enabled = False
+            window._on_ros_message({"topic": "/odom", "message": base_message, "recv_time_epoch_s": start_epoch + 1.5})
+
+            window._stop_summary_recording(save=True)
+
+            with (session_dir / "ros_odom.csv").open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            with (session_dir / "session.json").open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["recv_time"], str(start_epoch + 0.5))
+            self.assertEqual(metadata["dropped_pre_start_ros_messages"], 1)
+            self.assertEqual(metadata["dropped_post_stop_ros_messages"], 1)
+
+    def test_stop_summary_recording_sets_stop_boundary_before_packaging(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+
+        with temp_dir() as tmp:
+            session_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260609_102000")
+            self.assertTrue(window._summary_recording_gate_enabled)
+
+            observed = {}
+            main_window_module = sys.modules["main_window"]
+            original_package = main_window_module.build_summary_package
+            main_window_module.build_summary_package = lambda _session_dir: observed.update(
+                gate=window._summary_recording_gate_enabled,
+                stop_epoch=window._summary_recording_stop_epoch_s,
+            ) or {}
+            try:
+                window._stop_summary_recording(save=True)
+            finally:
+                main_window_module.build_summary_package = original_package
+
+            self.assertFalse(observed["gate"])
+            self.assertIsNotNone(observed["stop_epoch"])
+            with (session_dir / "session.json").open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            self.assertEqual(metadata["recording_stop_epoch_s"], observed["stop_epoch"])
+            self.assertAlmostEqual(
+                metadata["duration_s"],
+                metadata["recording_stop_epoch_s"] - metadata["recording_start_epoch_s"],
+                places=3,
+            )
+
+    def test_async_stop_detaches_ui_state_before_background_finalize(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+
+        with temp_dir() as tmp:
+            window._summary_note_edit.setPlainText("async stop")
+            session_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260609_110000")
+            window._buffer.append(make_encoder_frame())
+            window._imu_panel._on_sample("A", make_imu_sample(1))
+
+            captured = {}
+            window._run_background_task = lambda function, _finished, _error: captured.setdefault("function", function)
+            window._imu_panel.stop_recording = lambda save: (_ for _ in ()).throw(
+                AssertionError("background stop must not call ImuPanel.stop_recording")
+            )
+
+            window._stop_summary_recording_async(save=True)
+
+            self.assertIn("function", captured)
+            window._summary_files_metadata = lambda: (_ for _ in ()).throw(
+                AssertionError("background stop must not read summary UI state")
+            )
+            result = captured["function"]()
+
+            self.assertEqual(result, session_dir)
+            self.assertTrue((session_dir / "encoder.csv").exists())
+            self.assertTrue((session_dir / "imu_A.csv").exists())
+            self.assertTrue((session_dir / "imu_session.json").exists())
 
     def test_radar_sync_checkbox_is_enabled_only_after_successful_connection_test(self) -> None:
         window = MainWindow()

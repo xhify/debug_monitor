@@ -425,11 +425,15 @@ class ImuPanel(QWidget):
     def stop_recording(self, save: bool) -> Path | None:
         return self._stop_recording(save=save)
 
-    def _stop_recording(self, save: bool) -> Path | None:
+    def detach_recording_session(self):
         recorder = self._session_recorder
         self._session_recorder = None
         self._record_btn.setText("开始记录")
         self._record_btn.setStyleSheet("")
+        return recorder
+
+    def _stop_recording(self, save: bool) -> Path | None:
+        recorder = self.detach_recording_session()
         if recorder is None:
             return None
         if save:

@@ -94,6 +94,7 @@ class _BaseAkmRecorder:
         fields = self._clock.now_record_fields()
         if recv_time_epoch_s is not None:
             fields["recv_time_epoch_s"] = float(recv_time_epoch_s)
+            fields["session_elapsed_s"] = self._clock.elapsed_from_epoch(float(recv_time_epoch_s))
         return {
             "session_id": fields["session_id"],
             "ros_time": extract_header_stamp(message),

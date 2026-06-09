@@ -33,6 +33,30 @@ def temp_dir():
 
 
 class AkmRecorderTests(unittest.TestCase):
+    def test_akm_recorder_elapsed_uses_recv_time_epoch_when_provided(self) -> None:
+        with temp_dir() as tmp:
+            path = tmp / "akm_state.csv"
+            clock = RecordingClock(
+                session_id="session_akm_time",
+                start_epoch_s=1000.0,
+                start_perf_s=1.0,
+            )
+            recorder = AkmStateRecorder(path, clock)
+            recorder.write_message(
+                {
+                    "header": {"stamp": {"secs": 1, "nsecs": 0}, "frame_id": "base_link"},
+                    "seq_id": 1,
+                },
+                recv_time_epoch_s=1002.5,
+            )
+            recorder.close()
+
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(rows[0]["recv_time_epoch_s"], "1002.5")
+            self.assertEqual(rows[0]["session_elapsed_s"], "2.5")
+
     def test_akm_state_recorder_writes_fixed_columns(self) -> None:
         with temp_dir() as tmp:
             path = tmp / "akm_state.csv"

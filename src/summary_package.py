@@ -6,6 +6,7 @@ import csv
 import json
 from pathlib import Path
 import shutil
+import time
 import zipfile
 
 from alignment import write_alignment_outputs
@@ -31,6 +32,7 @@ RAW_FILE_MAP = {
 
 
 def build_summary_package(session_dir: Path) -> dict[str, object]:
+    total_start = time.perf_counter()
     session_dir = Path(session_dir)
     raw_dir = session_dir / "raw"
     aligned_dir = session_dir / "aligned"
@@ -48,7 +50,9 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
     row_counts: dict[str, int] = {}
     warnings: list[str] = list(source_session.get("warnings", []))
     errors: list[str] = list(source_session.get("errors", []))
+    timings_s: dict[str, float] = {}
 
+    stage_start = time.perf_counter()
     for source_name, raw_name in RAW_FILE_MAP.items():
         source_path = session_dir / source_name
         if not source_path.exists():
@@ -67,7 +71,9 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
             generated_files.append(str(path.relative_to(session_dir)).replace("\\", "/"))
             if path.suffix.lower() == ".csv":
                 row_counts[str(path.relative_to(raw_dir)).replace("\\", "/")] = _count_csv_rows(path)
+    timings_s["copy_raw"] = _elapsed(stage_start)
 
+    stage_start = time.perf_counter()
     try:
         alignment_stats = write_alignment_outputs(raw_dir=raw_dir, aligned_dir=aligned_dir)
     except Exception as exc:
@@ -79,6 +85,7 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
             if path.exists():
                 generated_files.append(str(path.relative_to(session_dir)).replace("\\", "/"))
                 row_counts[name] = _count_csv_rows(path)
+    timings_s["alignment"] = _elapsed(stage_start)
 
     for relative in ("session.json", "manifest.json", package_zip.name):
         if relative not in generated_files:
@@ -103,12 +110,14 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
         "errors": errors,
         "package_zip": str(package_zip),
         "alignment": alignment_stats,
+        "timings_s": timings_s,
     }
+
+    timings_s["zip"] = _write_zip(package_zip, session_dir, manifest, total_start)
+
     manifest_path = session_dir / "manifest.json"
     with manifest_path.open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
-
-    _write_zip(package_zip, session_dir)
 
     return manifest
 
@@ -118,12 +127,16 @@ def _count_csv_rows(path: Path) -> int:
         return max(0, sum(1 for _ in csv.reader(handle)) - 1)
 
 
-def _write_zip(package_zip: Path, session_dir: Path) -> None:
+def _elapsed(start: float) -> float:
+    return round(time.perf_counter() - start, 6)
+
+
+def _write_zip(package_zip: Path, session_dir: Path, manifest: dict[str, object], total_start: float) -> float:
+    start = time.perf_counter()
     with zipfile.ZipFile(package_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for relative in ("session.json", "manifest.json"):
-            path = session_dir / relative
-            if path.exists():
-                archive.write(path, relative)
+        path = session_dir / "session.json"
+        if path.exists():
+            archive.write(path, "session.json")
         for folder in ("raw", "aligned"):
             base = session_dir / folder
             if not base.exists():
@@ -131,3 +144,8 @@ def _write_zip(package_zip: Path, session_dir: Path) -> None:
             for path in base.rglob("*"):
                 if path.is_file():
                     archive.write(path, str(path.relative_to(session_dir)))
+        elapsed = _elapsed(start)
+        manifest["timings_s"]["zip"] = elapsed
+        manifest["timings_s"]["total"] = _elapsed(total_start)
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    return elapsed
