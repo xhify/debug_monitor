@@ -22,6 +22,7 @@ docs/superpowers/plans/*.md
 
 # Data files
 *.csv
+*.npz
 recordings/
 settings/pid_config.json
 
@@ -40,3 +41,7 @@ Thumbs.db
 # Test scratch
 tests/_tmp_command_panel/
 .test_tmp/
+
+# Local compute/cache artifacts
+.cupy_cache/
+nul
