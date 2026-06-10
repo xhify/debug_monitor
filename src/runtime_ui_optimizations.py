@@ -7,21 +7,32 @@ recording logic.
 
 from __future__ import annotations
 
-from time import perf_counter, time
+from time import time
 from typing import Any
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
     QWidget,
 )
 
-from app_config import DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
-from serial_worker import SerialWorker
+from app_config import (
+    DEFAULT_MAP_TOPIC,
+    DEFAULT_MAP_UPDATE_PARAM,
+    DEFAULT_ROSBRIDGE_HOST,
+    DEFAULT_ROSBRIDGE_PORT,
+)
+from ros_odometry_client import parse_odometry_message
 from widgets.localization_panel import LocalizationPanel
 
 _SERIAL_SOURCE_KEYS = {"serial_encoder", "imu_A", "imu_B"}
@@ -40,6 +51,7 @@ _TOPIC_BY_SOURCE = {
     "control_debug": "/wheeltec/control_debug",
     "chassis_diagnostics": "/wheeltec/chassis_diagnostics",
 }
+_SOURCE_BY_TOPIC = {topic: source_id for source_id, topic in _TOPIC_BY_SOURCE.items()}
 
 
 def apply_runtime_ui_optimizations(main_window_cls: type) -> None:
@@ -52,24 +64,134 @@ def apply_runtime_ui_optimizations(main_window_cls: type) -> None:
 def _patch_localization_panel() -> None:
     if getattr(LocalizationPanel, "_optimized_no_error_stats", False):
         return
-    original_build_side_panel = LocalizationPanel._build_side_panel
 
     def _build_side_panel_without_error_stats(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setMinimumWidth(420)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         panel = QWidget()
-        layout = original_build_side_panel(self).layout()
-        if layout is None:
-            return panel
-        new_layout = type(layout)(panel)
-        new_layout.setContentsMargins(0, 0, 0, 0)
-        new_layout.setSpacing(8)
-        new_layout.addWidget(self._build_pose_group())
-        new_layout.addWidget(self._build_control_group())
-        new_layout.addWidget(self._build_feedback_group())
-        new_layout.addStretch()
-        return panel
+        panel.setMinimumWidth(400)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self._build_pose_group())
+        layout.addWidget(self._build_control_group())
+        _ensure_removed_stats_labels(self)
+        layout.addWidget(self._build_feedback_group())
+        layout.addStretch()
+        scroll.setWidget(panel)
+        return scroll
 
     LocalizationPanel._build_side_panel = _build_side_panel_without_error_stats
+    LocalizationPanel._build_control_group = _build_localization_control_group
     LocalizationPanel._optimized_no_error_stats = True
+
+
+def _build_localization_control_group(self) -> QGroupBox:
+    group = QGroupBox("测试与建图控制")
+    group.setMinimumHeight(300)
+    layout = QVBoxLayout(group)
+    layout.setContentsMargins(10, 14, 10, 10)
+    layout.setSpacing(8)
+
+    def add_button_row(button_specs: tuple[tuple[str, str, Any], ...]) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        for attr, text, handler in button_specs:
+            button = QPushButton(text)
+            button.clicked.connect(handler)
+            setattr(self, attr, button)
+            row.addWidget(button)
+        layout.addLayout(row)
+
+    add_button_row(
+        (
+            ("_set_origin_btn", "设置当前为起点", self._set_current_origin),
+            ("_clear_btn", "清空轨迹", self._clear),
+        )
+    )
+    add_button_row(
+        (
+            ("_record_btn", "开始定位记录", self._toggle_recording),
+            ("_report_btn", "生成测试摘要", self._write_report_dialog),
+        )
+    )
+    add_button_row(
+        (
+            ("_mapping_freeze_btn", "冻结建图", self._toggle_mapping_freeze),
+            ("_save_map_trajectory_btn", "保存地图与轨迹数据", self._write_frozen_package_dialog),
+        )
+    )
+    add_button_row(
+        (
+            ("_fastlio_launch_start_btn", "启动 FAST-LIO", self._start_fastlio_launch),
+            ("_fastlio_launch_stop_btn", "停止 FAST-LIO", self._stop_fastlio_launch),
+        )
+    )
+
+    self._fastlio_launch_label = QLabel("")
+    layout.addWidget(self._fastlio_launch_label)
+
+    add_button_row(
+        (
+            ("_lidar_launch_start_btn", "启动雷达节点", self._start_lidar_launch),
+            ("_lidar_launch_stop_btn", "停止雷达节点", self._stop_lidar_launch),
+        )
+    )
+
+    self._lidar_launch_label = QLabel("")
+    layout.addWidget(self._lidar_launch_label)
+
+    config_grid = QGridLayout()
+    config_grid.setContentsMargins(0, 2, 0, 0)
+    config_grid.setHorizontalSpacing(10)
+    config_grid.setVerticalSpacing(6)
+    config_grid.setColumnMinimumWidth(0, 112)
+    config_grid.setColumnStretch(1, 1)
+
+    self._map_update_param_edit = QLineEdit(DEFAULT_MAP_UPDATE_PARAM)
+    self._map_topic_edit = QLineEdit(DEFAULT_MAP_TOPIC)
+    self._local_map_path_edit = QLineEdit("")
+    for row_index, (title, edit) in enumerate(
+        (
+            ("建图参数:", self._map_update_param_edit),
+            ("地图 topic:", self._map_topic_edit),
+            ("本地地图路径:", self._local_map_path_edit),
+        )
+    ):
+        label = QLabel(title)
+        label.setMinimumWidth(112)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        edit.setMinimumWidth(280)
+        edit.setMinimumHeight(24)
+        edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        config_grid.addWidget(label, row_index, 0)
+        config_grid.addWidget(edit, row_index, 1)
+    layout.addLayout(config_grid)
+
+    self._map_label = QLabel("建图未冻结")
+    layout.addWidget(self._map_label)
+    self._record_label = QLabel("")
+    layout.addWidget(self._record_label)
+    return group
+
+
+def _ensure_removed_stats_labels(panel: Any) -> None:
+    for key in (
+        "lateral_error_current",
+        "lateral_error_rms",
+        "lateral_error_max",
+        "endpoint_lateral_error",
+        "endpoint_distance",
+        "stats_trajectory_length",
+        "yaw_rms",
+        "estimated_speed_mean",
+        "estimated_speed_std",
+    ):
+        panel._labels.setdefault(key, QLabel("---"))
 
 
 def _patch_main_window(cls: type) -> None:
@@ -79,11 +201,11 @@ def _patch_main_window(cls: type) -> None:
     original_setup_ui = cls._setup_ui
     original_on_ros_message = cls._on_ros_message
     original_on_ros_connection_changed = cls._on_ros_connection_changed
-    original_open_bridge = None
-
     def _setup_ui(self):
         original_setup_ui(self)
         _unify_rosbridge_controls(self)
+        _set_ros_related_refresh_intervals(self)
+        _connect_ros_latency_signal(self)
         _update_rosbridge_status(self, connected=getattr(self, "_ros_connected", False))
 
     def _build_summary_source_group(self):
@@ -161,13 +283,15 @@ def _patch_main_window(cls: type) -> None:
 
     def _on_ros_connection_changed(self, connected: bool):
         original_on_ros_connection_changed(self, connected)
+        _set_localization_connected_state(self, connected)
         _update_rosbridge_status(self, connected=connected)
 
     def _on_ros_message(self, event):
         original_on_ros_message(self, event)
         topic = event.get("topic", "") if isinstance(event, dict) else ""
         if topic:
-            _update_topic_rate_labels(self)
+            _update_topic_rate_label_for_event(self, event)
+            _update_localization_from_ros_message(self, event)
         _update_ros_latency(self, event)
 
     def _update_summary_row(self, key: str, connected: bool, frame_count: int, error_count: int):
@@ -184,9 +308,12 @@ def _patch_main_window(cls: type) -> None:
         row["baud_combo"].setEnabled(serial_source and not connected)
         row["refresh_btn"].setEnabled(serial_source and not connected)
         source_id = {"encoder": "serial_encoder", "imu_A": "imu_A", "imu_B": "imu_B"}.get(key)
-        if source_id:
-            self._summary_source_rate_labels[source_id].setText(hz_text)
-            self._summary_source_detail_labels[source_id].setText(
+        rate_labels = getattr(self, "_summary_source_rate_labels", {})
+        detail_labels = getattr(self, "_summary_source_detail_labels", {})
+        if source_id and source_id in rate_labels:
+            rate_labels[source_id].setText(hz_text)
+        if source_id and source_id in detail_labels:
+            detail_labels[source_id].setText(
                 f"帧 {frame_count} / 错误 {error_count} / {row['status_label'].text()}"
             )
 
@@ -351,9 +478,179 @@ def _unify_rosbridge_controls(window: Any) -> None:
             except Exception:
                 pass
             panel._disconnect_btn.clicked.connect(window._ros_worker.close_bridge)
+        if panel is getattr(window, "_localization_panel", None):
+            _wire_localization_to_unified_rosbridge(window, panel)
 
     host_edit.textChanged.connect(lambda text: _sync_unified_rosbridge_endpoint(window))
     port_spin.valueChanged.connect(lambda _value: _sync_unified_rosbridge_endpoint(window))
+    _set_localization_connected_state(window, getattr(window, "_ros_connected", False))
+
+
+def _wire_localization_to_unified_rosbridge(window: Any, panel: Any) -> None:
+    if hasattr(panel, "_connection_label"):
+        panel._connection_label.setMinimumWidth(300)
+        panel._connection_label.setWordWrap(True)
+    for edit_name in ("_map_update_param_edit", "_map_topic_edit", "_local_map_path_edit"):
+        edit = getattr(panel, edit_name, None)
+        if edit is not None:
+            edit.setMinimumWidth(280)
+            edit.setMinimumHeight(max(edit.minimumHeight(), 24))
+            edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            group = _ancestor_group(edit)
+            if group is not None:
+                group.setMinimumHeight(max(group.minimumHeight(), 300, group.sizeHint().height()))
+    for form in panel.findChildren(QFormLayout):
+        form.setHorizontalSpacing(12)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        if _form_contains_widgets(
+            form,
+            {
+                getattr(panel, "_map_update_param_edit", None),
+                getattr(panel, "_map_topic_edit", None),
+                getattr(panel, "_local_map_path_edit", None),
+            },
+        ):
+            form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+            form.setVerticalSpacing(6)
+            form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            _style_form_labels(form, minimum_width=112)
+    for label in panel.findChildren(QLabel):
+        if label.text() in {"建图参数:", "地图 topic:", "本地地图路径:"}:
+            label.setMinimumWidth(112)
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    _replace_button_handler(
+        panel,
+        "_fastlio_launch_start_btn",
+        lambda _checked=False: _publish_unified_launch_command(
+            window,
+            panel,
+            "start fastlio fast_lio mapping_c16.launch",
+            "FAST-LIO 启动命令已发送",
+            "set_fastlio_launch_status",
+        ),
+    )
+    _replace_button_handler(
+        panel,
+        "_fastlio_launch_stop_btn",
+        lambda _checked=False: _publish_unified_launch_command(
+            window,
+            panel,
+            "stop fastlio",
+            "FAST-LIO 停止命令已发送",
+            "set_fastlio_launch_status",
+        ),
+    )
+    _replace_button_handler(
+        panel,
+        "_lidar_launch_start_btn",
+        lambda _checked=False: _publish_unified_launch_command(
+            window,
+            panel,
+            "start lidar turn_on_wheeltec_robot wheeltec_lidar.launch",
+            "雷达节点启动命令已发送",
+            "set_lidar_launch_status",
+        ),
+    )
+    _replace_button_handler(
+        panel,
+        "_lidar_launch_stop_btn",
+        lambda _checked=False: _publish_unified_launch_command(
+            window,
+            panel,
+            "stop lidar",
+            "雷达节点停止命令已发送",
+            "set_lidar_launch_status",
+        ),
+    )
+
+
+def _replace_button_handler(panel: Any, button_name: str, handler: Any) -> None:
+    button = getattr(panel, button_name, None)
+    if button is None:
+        return
+    try:
+        button.clicked.disconnect()
+    except Exception:
+        pass
+    button.clicked.connect(handler)
+
+
+def _form_contains_widgets(form: QFormLayout, widgets: set[Any]) -> bool:
+    widgets.discard(None)
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, QFormLayout.FieldRole)
+        if item is not None and item.widget() in widgets:
+            return True
+    return False
+
+
+def _style_form_labels(form: QFormLayout, minimum_width: int) -> None:
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, QFormLayout.LabelRole)
+        label = item.widget() if item is not None else None
+        if label is not None:
+            label.setMinimumWidth(minimum_width)
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+
+def _ancestor_group(widget: Any) -> QGroupBox | None:
+    parent = widget.parent()
+    while parent is not None:
+        if isinstance(parent, QGroupBox):
+            return parent
+        parent = parent.parent()
+    return None
+
+
+def _publish_unified_launch_command(
+    window: Any,
+    panel: Any,
+    command: str,
+    status: str,
+    status_method_name: str,
+) -> None:
+    window._ros_worker.publish_launch_manager_command(command)
+    status_method = getattr(panel, status_method_name, None)
+    if status_method is not None:
+        status_method(status)
+
+
+def _set_localization_connected_state(window: Any, connected: bool) -> None:
+    panel = getattr(window, "_localization_panel", None)
+    if panel is None or not hasattr(panel, "_set_connected"):
+        return
+    panel._set_connected(connected)
+    if hasattr(panel, "_host_edit"):
+        panel._host_edit.setEnabled(False)
+    if hasattr(panel, "_port_spin"):
+        panel._port_spin.setEnabled(False)
+
+
+def _set_ros_related_refresh_intervals(window: Any) -> None:
+    for panel in (
+        getattr(window, "_ros_panel", None),
+        getattr(window, "_ros_imu_panel", None),
+        getattr(window, "_localization_panel", None),
+    ):
+        timer = getattr(panel, "_refresh_timer", None)
+        if timer is not None:
+            timer.setInterval(1000)
+
+
+def _connect_ros_latency_signal(window: Any) -> None:
+    signal = getattr(getattr(window, "_ros_worker", None), "network_latency_measured", None)
+    if signal is None:
+        return
+    signal.connect(lambda latency_ms, w=window: _on_network_latency_measured(w, latency_ms))
+
+
+def _on_network_latency_measured(window: Any, latency_ms: float) -> None:
+    try:
+        value = max(0.0, float(latency_ms))
+    except (TypeError, ValueError):
+        return
+    window._ros_network_latency_text = f"网络延迟: {value:.1f} ms"
+    _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
 
 
 def _sync_unified_rosbridge_endpoint(window: Any) -> None:
@@ -379,14 +676,23 @@ def _open_unified_rosbridge(window: Any) -> None:
 def _update_rosbridge_status(window: Any, connected: bool) -> None:
     host = window._ros_panel._host_edit.text().strip() if hasattr(window, "_ros_panel") else DEFAULT_ROSBRIDGE_HOST
     port = window._ros_panel._port_spin.value() if hasattr(window, "_ros_panel") else DEFAULT_ROSBRIDGE_PORT
-    latency = getattr(window, "_ros_latency_text", "延迟: ---")
-    text = f"ROSbridge: {'已连接' if connected else '未连接'} {host}:{port} / {latency} / 错误 {window._ros_worker.error_count}"
+    network_latency = getattr(window, "_ros_network_latency_text", "网络延迟: ---")
+    message_timing = getattr(window, "_ros_message_timing_text", "")
+    timing = f"{network_latency} / {message_timing}" if message_timing else network_latency
+    text = f"ROSbridge: {'已连接' if connected else '未连接'} {host}:{port} / {timing} / 错误 {window._ros_worker.error_count}"
     label = getattr(window, "_summary_rosbridge_status_label", None)
     if label is not None:
         label.setText(text)
     for panel in (getattr(window, "_ros_panel", None), getattr(window, "_ros_imu_panel", None), getattr(window, "_localization_panel", None)):
-        if panel is not None and hasattr(panel, "_connection_label"):
-            panel._connection_label.setText(text)
+        _set_panel_connection_text(panel, text)
+
+
+def _set_panel_connection_text(panel: Any, text: str) -> None:
+    if panel is None:
+        return
+    label = getattr(panel, "_connection_label", None) or getattr(panel, "_status_label", None)
+    if label is not None:
+        label.setText(text)
 
 
 def _update_ros_latency(window: Any, event: Any) -> None:
@@ -406,17 +712,70 @@ def _update_ros_latency(window: Any, event: Any) -> None:
     if ros_stamp <= 0:
         return
     recv_time = float(event.get("recv_time_epoch_s", time()))
-    latency_ms = max(0.0, (recv_time - ros_stamp) * 1000.0)
-    window._ros_latency_text = f"延迟: {latency_ms:.0f} ms"
+    latency_ms = (recv_time - ros_stamp) * 1000.0
+    if latency_ms < 0.0 or latency_ms > 5000.0:
+        sign = "+" if latency_ms > 0.0 else ""
+        text = f"时钟差: {sign}{latency_ms:.1f} ms"
+    else:
+        text = f"消息时差: {latency_ms:.1f} ms"
+    last_update = getattr(window, "_optimized_latency_ui_time", None)
+    if last_update is not None and recv_time - last_update < 1.0:
+        return
+    window._optimized_latency_ui_time = recv_time
+    window._ros_message_timing_text = text
     _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
 
 
-def _update_topic_rate_labels(window: Any) -> None:
+def _update_topic_rate_label_for_event(window: Any, event: Any) -> None:
+    if not isinstance(event, dict):
+        return
+    topic = str(event.get("topic", ""))
+    source_id = _SOURCE_BY_TOPIC.get(topic)
+    if not source_id:
+        return
     labels = getattr(window, "_summary_source_rate_labels", {})
-    for source_id, topic in _TOPIC_BY_SOURCE.items():
-        label = labels.get(source_id)
-        if label is None:
-            continue
-        key = f"topic:{topic}"
-        count = int(window._ros_topic_frame_counts.get(topic, 0))
-        label.setText(window._summary_hz_text(key, count))
+    label = labels.get(source_id)
+    if label is None:
+        return
+    try:
+        recv_time = float(event.get("recv_time_epoch_s", time()))
+    except (TypeError, ValueError):
+        recv_time = time()
+    count = int(window._ros_topic_frame_counts.get(topic, 0))
+    state = getattr(window, "_optimized_topic_rate_state", None)
+    if state is None:
+        state = {}
+        window._optimized_topic_rate_state = state
+    previous = state.get(topic)
+    if previous is None:
+        state[topic] = (recv_time, 0, "0 Hz")
+        label.setText("0 Hz")
+        return
+    previous_time, previous_count, previous_text = previous
+    elapsed = recv_time - previous_time
+    if count <= previous_count or elapsed < 1.0:
+        label.setText(previous_text)
+        return
+    hz = (count - previous_count) / elapsed
+    text = f"{max(0.0, hz):.0f} Hz"
+    state[topic] = (recv_time, count, text)
+    label.setText(text)
+
+
+def _update_localization_from_ros_message(window: Any, event: Any) -> None:
+    if not isinstance(event, dict):
+        return
+    if event.get("topic") != window._summary_trajectory_topic():
+        return
+    panel = getattr(window, "_localization_panel", None)
+    if panel is None:
+        return
+    message = event.get("message", {})
+    if not isinstance(message, dict):
+        return
+    sample = parse_odometry_message(
+        message,
+        source=str(event.get("topic", "")),
+        recv_time=float(event.get("recv_time_epoch_s", time())),
+    )
+    panel._on_sample(sample)

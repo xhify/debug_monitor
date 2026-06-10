@@ -123,6 +123,9 @@ class RosBridgeSession:
         ros_factory: Callable[[str, int], Any] | None = None,
         topic_factory: Callable[[Any, str, str], Any] | None = None,
         message_factory: Callable[[dict], Any] | None = None,
+        service_factory: Callable[[Any, str, str], Any] | None = None,
+        service_request_factory: Callable[[dict], Any] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
         on_snapshot: Callable[[RosSnapshot], None] | None = None,
         on_message: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -131,11 +134,15 @@ class RosBridgeSession:
         self._ros_factory = ros_factory
         self._topic_factory = topic_factory
         self._message_factory = message_factory
+        self._service_factory = service_factory
+        self._service_request_factory = service_request_factory
+        self._monotonic_clock = monotonic_clock or time.perf_counter
         self._on_snapshot = on_snapshot
         self._on_message = on_message
         self._lock = threading.Lock()
         self._snapshot = RosSnapshot()
         self._topics: dict[str, Any] = {}
+        self._time_service: Any | None = None
         self.ros: Any | None = None
         self.connected = False
 
@@ -157,6 +164,8 @@ class RosBridgeSession:
         self._topics[control_name] = self._topic_factory(self.ros, control_name, control_type)
         launch_name, launch_type = self.LAUNCH_MANAGER_COMMAND_TOPIC
         self._topics[launch_name] = self._topic_factory(self.ros, launch_name, launch_type)
+        if self._service_factory is not None:
+            self._time_service = self._service_factory(self.ros, "/rosapi/get_time", "rosapi/GetTime")
         self.connected = True
 
     def disconnect(self) -> None:
@@ -204,6 +213,16 @@ class RosBridgeSession:
         topic = self.topic("/launch_manager/command")
         topic.publish(self._message_factory({"data": str(command)}))
 
+    def measure_network_latency_ms(self, timeout: float = 0.5) -> float:
+        if not self.connected:
+            raise RuntimeError("rosbridge is not connected")
+        if self._time_service is None:
+            raise RuntimeError("rosapi get_time service is unavailable")
+        start = self._monotonic_clock()
+        self._time_service.call(self._service_request_factory({}), timeout=timeout)
+        elapsed_s = max(0.0, self._monotonic_clock() - start)
+        return elapsed_s * 1000.0
+
     def snapshot(self) -> RosSnapshot:
         with self._lock:
             return self._snapshot.clone()
@@ -215,6 +234,8 @@ class RosBridgeSession:
         if self._ros_factory and self._topic_factory:
             if self._message_factory is None:
                 self._message_factory = lambda message: message
+            if self._service_request_factory is None:
+                self._service_request_factory = lambda request: request
             return
         try:
             import roslibpy
@@ -226,6 +247,10 @@ class RosBridgeSession:
             self._topic_factory = roslibpy.Topic
         if self._message_factory is None:
             self._message_factory = roslibpy.Message
+        if self._service_factory is None:
+            self._service_factory = roslibpy.Service
+        if self._service_request_factory is None:
+            self._service_request_factory = roslibpy.ServiceRequest
 
     def _callback_for(self, name: str) -> Callable[[dict], None]:
         if name == "/odom":
@@ -372,6 +397,7 @@ class RosBridgeWorker(QThread):
 
     snapshot_received = Signal(object)
     message_received = Signal(object)
+    network_latency_measured = Signal(float)
     error_occurred = Signal(str)
     connection_changed = Signal(bool)
 
@@ -382,6 +408,7 @@ class RosBridgeWorker(QThread):
         self._host = DEFAULT_ROSBRIDGE_HOST
         self._port = DEFAULT_ROSBRIDGE_PORT
         self._error_count = 0
+        self._network_latency_ms: float | None = None
 
     @property
     def error_count(self) -> int:
@@ -392,6 +419,10 @@ class RosBridgeWorker(QThread):
         if self._session is None:
             return 0
         return self._session.snapshot().frame_count
+
+    @property
+    def network_latency_ms(self) -> float | None:
+        return self._network_latency_ms
 
     def open_bridge(self, host: str, port: int = DEFAULT_ROSBRIDGE_PORT) -> None:
         if self.isRunning():
@@ -448,7 +479,16 @@ class RosBridgeWorker(QThread):
             )
             self._session.connect()
             self.connection_changed.emit(True)
+            next_latency_probe_s = 0.0
             while self._running:
+                now = time.monotonic()
+                if now >= next_latency_probe_s:
+                    try:
+                        self._network_latency_ms = self._session.measure_network_latency_ms(timeout=0.5)
+                        self.network_latency_measured.emit(float(self._network_latency_ms))
+                    except Exception:
+                        self._network_latency_ms = None
+                    next_latency_probe_s = now + 1.0
                 time.sleep(0.05)
         except Exception as exc:
             self._error_count += 1

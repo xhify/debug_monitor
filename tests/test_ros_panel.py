@@ -84,6 +84,53 @@ class RosPanelTests(unittest.TestCase):
             ],
         )
 
+    def test_radar_calibration_launch_buttons_emit_launch_manager_commands(self) -> None:
+        panel = RosPanel()
+        commands: list[str] = []
+        panel.launch_manager_command_requested.connect(commands.append)
+        panel.set_connected(True)
+
+        panel._radar_calibration_launch_start_btn.click()
+        panel._radar_calibration_launch_stop_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "restart pid_control simple_follower pid_control_lidar_assisted.launch "
+                "imu_topic:=/active_imu lidar_odom_topic:=/Odometry",
+                "stop pid_control",
+            ],
+        )
+
+    def test_pid_and_radar_calibration_launch_buttons_are_mutually_guarded(self) -> None:
+        panel = RosPanel()
+        panel.set_connected(True)
+
+        panel._pid_launch_start_btn.click()
+
+        self.assertTrue(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_start_btn.isEnabled())
+
+        panel._pid_launch_stop_btn.click()
+
+        self.assertTrue(panel._pid_launch_start_btn.isEnabled())
+        self.assertTrue(panel._radar_calibration_launch_start_btn.isEnabled())
+
+        panel._radar_calibration_launch_start_btn.click()
+
+        self.assertFalse(panel._pid_launch_start_btn.isEnabled())
+        self.assertTrue(panel._radar_calibration_launch_start_btn.isEnabled())
+
+    def test_disconnected_state_disables_all_launch_buttons(self) -> None:
+        panel = RosPanel()
+
+        panel.set_connected(False)
+
+        self.assertFalse(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._pid_launch_stop_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_stop_btn.isEnabled())
+
     def test_update_snapshot_refreshes_ros_values(self) -> None:
         panel = RosPanel()
 

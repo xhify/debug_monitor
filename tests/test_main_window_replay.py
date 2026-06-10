@@ -272,6 +272,24 @@ class MainWindowReplayTests(unittest.TestCase):
             ],
         )
 
+    def test_ros_panel_radar_calibration_launch_buttons_publish_launch_manager_commands(self) -> None:
+        window = MainWindow()
+        commands: list[str] = []
+        window._ros_worker.publish_launch_manager_command = commands.append
+        window._ros_panel.set_connected(True)
+
+        window._ros_panel._radar_calibration_launch_start_btn.click()
+        window._ros_panel._radar_calibration_launch_stop_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "restart pid_control simple_follower pid_control_lidar_assisted.launch "
+                "imu_topic:=/active_imu lidar_odom_topic:=/Odometry",
+                "stop pid_control",
+            ],
+        )
+
     def test_localization_panel_fastlio_launch_buttons_publish_launch_manager_commands(self) -> None:
         window = MainWindow()
         commands: list[str] = []

@@ -26,6 +26,13 @@ import pyqtgraph as pg
 from ros_bridge_worker import RosSnapshot
 from ros_data import RosCsvRecordingSession, RosTimeSeriesBuffer
 
+PID_LAUNCH_COMMAND = "start pid_control simple_follower pid_control.launch"
+RADAR_CALIBRATION_LAUNCH_COMMAND = (
+    "restart pid_control simple_follower pid_control_lidar_assisted.launch "
+    "imu_topic:=/active_imu lidar_odom_topic:=/Odometry"
+)
+PID_LAUNCH_STOP_COMMAND = "stop pid_control"
+
 
 class RosPanel(QWidget):
     """ROS monitor and command panel backed by rosbridge websocket."""
@@ -46,6 +53,8 @@ class RosPanel(QWidget):
         self._target_speed_rows: deque[tuple[float, float, float]] = deque(maxlen=3000)
         self._target_left_speed = 0.0
         self._target_right_speed = 0.0
+        self._launch_buttons_connected = False
+        self._active_launch_variant: str | None = None
         self._recording_session: RosCsvRecordingSession | None = None
         self._pending_snapshot: RosSnapshot | None = None
         self._setup_ui()
@@ -173,6 +182,12 @@ class RosPanel(QWidget):
         self._pid_launch_stop_btn = QPushButton("停止 PID 节点")
         self._pid_launch_stop_btn.clicked.connect(self._on_pid_launch_stop)
         pid_launch_row.addWidget(self._pid_launch_stop_btn)
+        self._radar_calibration_launch_start_btn = QPushButton("启动雷达直线校准")
+        self._radar_calibration_launch_start_btn.clicked.connect(self._on_radar_calibration_launch_start)
+        pid_launch_row.addWidget(self._radar_calibration_launch_start_btn)
+        self._radar_calibration_launch_stop_btn = QPushButton("停止雷达直线校准")
+        self._radar_calibration_launch_stop_btn.clicked.connect(self._on_radar_calibration_launch_stop)
+        pid_launch_row.addWidget(self._radar_calibration_launch_stop_btn)
         pid_launch_row.addStretch()
         pid_form.addRow(pid_launch_row)
 
@@ -255,8 +270,10 @@ class RosPanel(QWidget):
         self._pid_forward_btn.setEnabled(connected)
         self._pid_backward_btn.setEnabled(connected)
         self._pid_stop_btn.setEnabled(connected)
-        self._pid_launch_start_btn.setEnabled(connected)
-        self._pid_launch_stop_btn.setEnabled(connected)
+        self._launch_buttons_connected = connected
+        if not connected:
+            self._active_launch_variant = None
+        self._update_launch_button_guard()
         self._status_label.setText("已连接" if connected else "未连接")
         self._status_label.setStyleSheet("color: green;" if connected else "color: red;")
 
@@ -331,12 +348,43 @@ class RosPanel(QWidget):
         self.pid_control_requested.emit(0.0, False, False)
 
     def _on_pid_launch_start(self) -> None:
-        self.launch_manager_command_requested.emit("start pid_control simple_follower pid_control.launch")
+        self._active_launch_variant = "pid"
+        self._update_launch_button_guard()
+        self.launch_manager_command_requested.emit(PID_LAUNCH_COMMAND)
         self.set_pid_launch_status("PID 节点启动命令已发送")
 
     def _on_pid_launch_stop(self) -> None:
-        self.launch_manager_command_requested.emit("stop pid_control")
+        self._active_launch_variant = None
+        self._update_launch_button_guard()
+        self.launch_manager_command_requested.emit(PID_LAUNCH_STOP_COMMAND)
         self.set_pid_launch_status("PID 节点停止命令已发送")
+
+    def _on_radar_calibration_launch_start(self) -> None:
+        self._active_launch_variant = "radar_calibration"
+        self._update_launch_button_guard()
+        self.launch_manager_command_requested.emit(RADAR_CALIBRATION_LAUNCH_COMMAND)
+        self.set_pid_launch_status("雷达直线校准节点启动命令已发送")
+
+    def _on_radar_calibration_launch_stop(self) -> None:
+        self._active_launch_variant = None
+        self._update_launch_button_guard()
+        self.launch_manager_command_requested.emit(PID_LAUNCH_STOP_COMMAND)
+        self.set_pid_launch_status("雷达直线校准节点停止命令已发送")
+
+    def _update_launch_button_guard(self) -> None:
+        connected = self._launch_buttons_connected
+        if not connected:
+            self._pid_launch_start_btn.setEnabled(False)
+            self._pid_launch_stop_btn.setEnabled(False)
+            self._radar_calibration_launch_start_btn.setEnabled(False)
+            self._radar_calibration_launch_stop_btn.setEnabled(False)
+            return
+        self._pid_launch_start_btn.setEnabled(self._active_launch_variant in (None, "pid"))
+        self._radar_calibration_launch_start_btn.setEnabled(
+            self._active_launch_variant in (None, "radar_calibration")
+        )
+        self._pid_launch_stop_btn.setEnabled(True)
+        self._radar_calibration_launch_stop_btn.setEnabled(True)
 
     def set_pid_launch_status(self, text: str, *, error: bool = False) -> None:
         self._pid_launch_status_label.setText(text)

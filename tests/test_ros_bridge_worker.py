@@ -54,9 +54,27 @@ class FakeTopic:
         self.unsubscribed = True
 
 
+class FakeService:
+    calls: list[tuple[str, str, dict, float | None]] = []
+
+    def __init__(self, ros: FakeRos, name: str, service_type: str) -> None:
+        self.ros = ros
+        self.name = name
+        self.service_type = service_type
+
+    def call(self, request, timeout=None):
+        FakeService.calls.append((self.name, self.service_type, dict(request), timeout))
+        return {"time": {"secs": 1, "nsecs": 0}}
+
+
+class FakeServiceRequest(dict):
+    pass
+
+
 class RosBridgeSessionTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeTopic.created.clear()
+        FakeService.calls.clear()
 
     def test_connect_subscribes_to_standard_robot_topics(self) -> None:
         session = RosBridgeSession(
@@ -87,6 +105,27 @@ class RosBridgeSessionTests(unittest.TestCase):
                 ("/line_follow_control", "simple_follower/LineFollowControl"),
                 ("/launch_manager/command", "std_msgs/String"),
             ],
+        )
+
+    def test_measure_network_latency_uses_rosapi_get_time_round_trip(self) -> None:
+        times = iter([10.0, 10.012])
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            service_factory=FakeService,
+            service_request_factory=FakeServiceRequest,
+            monotonic_clock=lambda: next(times),
+        )
+        session.connect()
+
+        latency_ms = session.measure_network_latency_ms(timeout=0.25)
+
+        self.assertAlmostEqual(latency_ms, 12.0)
+        self.assertEqual(
+            FakeService.calls,
+            [("/rosapi/get_time", "rosapi/GetTime", {}, 0.25)],
         )
 
     def test_callbacks_update_latest_ros_state(self) -> None:
