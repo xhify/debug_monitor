@@ -8,6 +8,10 @@ WHEELTEC C50X 调试监视器 — 入口点
 import sys
 from PySide6.QtWidgets import QApplication
 from main_window import MainWindow
+from runtime_ui_optimizations import apply_runtime_ui_optimizations
+
+
+apply_runtime_ui_optimizations(MainWindow)
 
 
 def main() -> None:
