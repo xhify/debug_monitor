@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+import json
 from math import asin, atan2, copysign, degrees, pi, sqrt
 import threading
 import time
@@ -110,6 +111,7 @@ class RosBridgeSession:
         ("/wheeltec/akm_state", "turn_on_wheeltec_robot/AkmState"),
         ("/wheeltec/control_debug", "turn_on_wheeltec_robot/ControlDebug"),
         ("/wheeltec/chassis_diagnostics", "turn_on_wheeltec_robot/ChassisDiagnostics"),
+        ("/launch_manager/status", "std_msgs/String"),
     )
     CMD_VEL_TOPIC = ("/cmd_vel", "geometry_msgs/Twist")
     LINE_FOLLOW_CONTROL_TOPIC = ("/line_follow_control", "simple_follower/LineFollowControl")
@@ -128,6 +130,7 @@ class RosBridgeSession:
         monotonic_clock: Callable[[], float] | None = None,
         on_snapshot: Callable[[RosSnapshot], None] | None = None,
         on_message: Callable[[dict[str, Any]], None] | None = None,
+        on_launch_manager_status: Callable[[dict], None] | None = None,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -139,6 +142,7 @@ class RosBridgeSession:
         self._monotonic_clock = monotonic_clock or time.perf_counter
         self._on_snapshot = on_snapshot
         self._on_message = on_message
+        self._on_launch_manager_status_callback = on_launch_manager_status
         self._lock = threading.Lock()
         self._snapshot = RosSnapshot()
         self._topics: dict[str, Any] = {}
@@ -213,6 +217,34 @@ class RosBridgeSession:
         topic = self.topic("/launch_manager/command")
         topic.publish(self._message_factory({"data": str(command)}))
 
+    def request_rosbag_start(self, config: dict) -> None:
+        payload = dict(config)
+        payload["action"] = "start_rosbag"
+        self._publish_launch_manager_json(payload)
+
+    def request_rosbag_stop(self, session_id: str) -> None:
+        self._publish_launch_manager_json({"action": "stop_rosbag", "session_id": session_id})
+
+    def request_rosbag_list(self, bag_dir: str = "/home/wheeltec/bags") -> None:
+        self._publish_launch_manager_json({"action": "list_rosbags", "bag_dir": bag_dir})
+
+    def request_rosbag_inspect(self, session_id: str) -> None:
+        self._publish_launch_manager_json({"action": "inspect_rosbag", "session_id": session_id})
+
+    def request_rosbag_trash(self, session_id: str) -> None:
+        self._publish_launch_manager_json({"action": "trash_rosbag", "session_id": session_id})
+
+    def request_rosbag_delete(self, session_id: str, confirm: str) -> None:
+        self._publish_launch_manager_json(
+            {"action": "delete_rosbag", "session_id": session_id, "confirm": confirm}
+        )
+
+    def request_launch_manager_status(self) -> None:
+        self._publish_launch_manager_json({"action": "query_status"})
+
+    def _publish_launch_manager_json(self, payload: dict[str, Any]) -> None:
+        self.publish_launch_manager_command(json.dumps(payload, ensure_ascii=False))
+
     def measure_network_latency_ms(self, timeout: float = 0.5) -> float:
         if not self.connected:
             raise RuntimeError("rosbridge is not connected")
@@ -267,6 +299,8 @@ class RosBridgeSession:
             "/wheeltec/chassis_diagnostics",
         ):
             return lambda message, topic_name=name: self._on_passthrough(topic_name, message)
+        if name == "/launch_manager/status":
+            return lambda message, topic_name=name: self._on_launch_manager_status(topic_name, message)
         raise ValueError(f"unsupported ROS topic: {name}")
 
     def _publish_snapshot(self) -> None:
@@ -373,6 +407,20 @@ class RosBridgeSession:
         self._publish_snapshot()
         self._publish_message(topic_name, self._topic_type(topic_name), message, recv_time)
 
+    def _on_launch_manager_status(self, topic_name: str, message: dict) -> None:
+        recv_time = time.time()
+        raw_data = message.get("data", "")
+        try:
+            payload = json.loads(raw_data) if isinstance(raw_data, str) else {}
+            if not isinstance(payload, dict):
+                payload = {}
+        except json.JSONDecodeError as exc:
+            payload = {"error": "invalid_json", "raw": str(raw_data), "message": str(exc)}
+        else:
+            if self._on_launch_manager_status_callback is not None:
+                self._on_launch_manager_status_callback(payload)
+        self._publish_message(topic_name, "std_msgs/String", payload, recv_time)
+
     def _publish_message(self, topic_name: str, message_type: str, message: dict, recv_time: float) -> None:
         if self._on_message is None:
             return
@@ -397,6 +445,7 @@ class RosBridgeWorker(QThread):
 
     snapshot_received = Signal(object)
     message_received = Signal(object)
+    launch_manager_status_received = Signal(object)
     network_latency_measured = Signal(float)
     error_occurred = Signal(str)
     connection_changed = Signal(bool)
@@ -464,6 +513,36 @@ class RosBridgeWorker(QThread):
             self._error_count += 1
             self.error_occurred.emit(f"ROS launch 管理命令发送失败: {exc}")
 
+    def request_rosbag_start(self, config: dict) -> None:
+        self._request_session_command("request_rosbag_start", config)
+
+    def request_rosbag_stop(self, session_id: str) -> None:
+        self._request_session_command("request_rosbag_stop", session_id)
+
+    def request_rosbag_list(self, bag_dir: str = "/home/wheeltec/bags") -> None:
+        self._request_session_command("request_rosbag_list", bag_dir)
+
+    def request_rosbag_inspect(self, session_id: str) -> None:
+        self._request_session_command("request_rosbag_inspect", session_id)
+
+    def request_rosbag_trash(self, session_id: str) -> None:
+        self._request_session_command("request_rosbag_trash", session_id)
+
+    def request_rosbag_delete(self, session_id: str, confirm: str) -> None:
+        self._request_session_command("request_rosbag_delete", session_id, confirm)
+
+    def request_launch_manager_status(self) -> None:
+        self._request_session_command("request_launch_manager_status")
+
+    def _request_session_command(self, method_name: str, *args) -> None:
+        try:
+            if self._session is None:
+                raise RuntimeError("rosbridge is not connected")
+            getattr(self._session, method_name)(*args)
+        except Exception as exc:
+            self._error_count += 1
+            self.error_occurred.emit(f"ROS rosbag 命令发送失败: {exc}")
+
     def latest_snapshot(self) -> RosSnapshot | None:
         if self._session is None:
             return None
@@ -476,6 +555,7 @@ class RosBridgeWorker(QThread):
                 port=self._port,
                 on_snapshot=self.snapshot_received.emit,
                 on_message=self.message_received.emit,
+                on_launch_manager_status=self.launch_manager_status_received.emit,
             )
             self._session.connect()
             self.connection_changed.emit(True)

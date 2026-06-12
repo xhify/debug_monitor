@@ -10,6 +10,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter, time
+from dataclasses import asdict
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app_config import DEFAULT_FASTLIO_ODOM_TOPIC, DEFAULT_RECORDINGS_DIR
+from app_config import DEFAULT_FASTLIO_ODOM_TOPIC, DEFAULT_RECORDINGS_DIR, DEFAULT_ROSBAG_REMOTE_DIR
 from akm_topic_recorders import AkmStateRecorder, ChassisDiagnosticsRecorder, ControlDebugRecorder
 from analytics import compute_channel_metrics
 from data_buffer import COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B, DataBuffer
@@ -44,6 +45,14 @@ from radar_bin_parser import parse_radar_recording
 from radar_scpi import RadarScpiClient
 from replay_data import ReplayData
 from ros_bridge_worker import RosBridgeWorker
+from rosbag_models import (
+    RemoteRosbagSession,
+    RosbagLibraryState,
+    RosbagRecordingStatus,
+    parse_rosbag_library_state,
+    parse_rosbag_recording_status,
+)
+from rosbag_sync_worker import RosbagSyncWorker
 from ros_topic_recorders import (
     make_odometry_recorder,
     make_power_voltage_recorder,
@@ -63,6 +72,7 @@ from widgets.localization_panel import LocalizationPanel
 from widgets.param_panel import ParamPanel
 from widgets.plot_panel import PlotPanel
 from widgets.ros_imu_panel import RosImuPanel
+from widgets.rosbag_panel import RosbagPanel
 from widgets.ros_panel import RosPanel
 from widgets.serial_panel import SerialPanel
 
@@ -104,6 +114,7 @@ class MainWindow(QMainWindow):
         self._ros_worker = RosBridgeWorker()
         self._ros_worker.snapshot_received.connect(self._on_ros_snapshot)
         self._ros_worker.message_received.connect(self._on_ros_message)
+        self._ros_worker.launch_manager_status_received.connect(self._on_launch_manager_status)
         self._ros_worker.error_occurred.connect(self._on_error)
         self._ros_worker.connection_changed.connect(self._on_ros_connection_changed)
 
@@ -138,7 +149,16 @@ class MainWindow(QMainWindow):
         self._summary_dropped_post_stop_ros_messages = 0
         self._summary_background_threads: list[QThread] = []
         self._summary_background_workers: list[_FunctionWorker] = []
+        self._rosbag_sync_threads: list[QThread] = []
+        self._rosbag_sync_workers: list[RosbagSyncWorker] = []
         self._latest_ros_snapshot = None
+        self._latest_rosbag_status = RosbagRecordingStatus()
+        self._latest_rosbag_library = RosbagLibraryState()
+        self._summary_rosbag_session_id = ""
+        self._summary_rosbag_config: dict[str, object] = {}
+        self._summary_rosbag_start_sent = False
+        self._summary_rosbag_stop_sent = False
+        self._summary_latest_rosbag_status: dict[str, object] = {}
         self._ros_topic_frame_counts: dict[str, int] = {}
         self._ros_connected = False
         self._radar_client = RadarScpiClient()
@@ -270,6 +290,7 @@ class MainWindow(QMainWindow):
         self._imu_panel = ImuPanel()
         self._ros_panel = RosPanel()
         self._ros_imu_panel = RosImuPanel()
+        self._rosbag_panel = RosbagPanel()
         self._localization_panel = LocalizationPanel()
         self._ros_panel.connect_requested.connect(self._ros_worker.open_bridge)
         self._ros_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
@@ -278,12 +299,14 @@ class MainWindow(QMainWindow):
         self._ros_panel.launch_manager_command_requested.connect(self._publish_launch_manager_command)
         self._ros_imu_panel.connect_requested.connect(self._ros_worker.open_bridge)
         self._ros_imu_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
+        self._connect_rosbag_panel_signals()
         self._summary_page = self._build_summary_page()
         self._module_stack.addWidget(self._summary_page)
         self._module_stack.addWidget(self._encoder_page)
         self._module_stack.addWidget(self._imu_panel)
         self._module_stack.addWidget(self._ros_panel)
         self._module_stack.addWidget(self._ros_imu_panel)
+        self._module_stack.addWidget(self._rosbag_panel)
         self._module_stack.addWidget(self._localization_panel)
         self._module_stack.setCurrentWidget(self._encoder_page)
 
@@ -336,6 +359,12 @@ class MainWindow(QMainWindow):
         self._module_button_group.addButton(self._ros_imu_module_btn)
         switch_row.addWidget(self._ros_imu_module_btn)
 
+        self._rosbag_module_btn = QPushButton("ROSBag")
+        self._rosbag_module_btn.setCheckable(True)
+        self._rosbag_module_btn.clicked.connect(lambda: self._switch_module("rosbag"))
+        self._module_button_group.addButton(self._rosbag_module_btn)
+        switch_row.addWidget(self._rosbag_module_btn)
+
         self._localization_module_btn = QPushButton("定位精度")
         self._localization_module_btn.setCheckable(True)
         self._localization_module_btn.clicked.connect(lambda: self._switch_module("localization"))
@@ -366,8 +395,26 @@ class MainWindow(QMainWindow):
             self._module_stack.setCurrentWidget(self._ros_imu_panel)
             self._status_label.setText("ROS IMU 模块")
             return
+        if module == "rosbag":
+            self._module_stack.setCurrentWidget(self._rosbag_panel)
+            self._status_label.setText("ROSBag 管理")
+            return
         self._module_stack.setCurrentWidget(self._encoder_page)
         self._status_label.setText("编码器模块")
+
+    def _connect_rosbag_panel_signals(self) -> None:
+        self._rosbag_panel.start_requested.connect(self._ros_worker.request_rosbag_start)
+        self._rosbag_panel.stop_requested.connect(self._ros_worker.request_rosbag_stop)
+        self._rosbag_panel.list_requested.connect(self._ros_worker.request_rosbag_list)
+        self._rosbag_panel.inspect_requested.connect(self._ros_worker.request_rosbag_inspect)
+        self._rosbag_panel.trash_requested.connect(self._ros_worker.request_rosbag_trash)
+        self._rosbag_panel.delete_requested.connect(self._on_rosbag_delete_requested)
+        self._rosbag_panel.query_status_requested.connect(self._ros_worker.request_launch_manager_status)
+        self._rosbag_panel.sync_requested.connect(self._start_rosbag_sync)
+
+    def _on_rosbag_delete_requested(self, session_id: str, confirm: str) -> None:
+        self._ros_worker.request_rosbag_delete(session_id, confirm)
+        self._status_label.setText("已发送永久删除请求")
 
     def _build_summary_page(self) -> QWidget:
         page = QWidget()
@@ -404,6 +451,14 @@ class MainWindow(QMainWindow):
         self._summary_radar_status_label = QLabel("雷达未测试")
         radar_row.addWidget(self._summary_radar_status_label, stretch=1)
         record_layout.addLayout(radar_row)
+
+        rosbag_row = QHBoxLayout()
+        self._summary_rosbag_sync_cb = QCheckBox("同步车端 rosbag 录制")
+        self._summary_rosbag_sync_cb.setChecked(True)
+        rosbag_row.addWidget(self._summary_rosbag_sync_cb)
+        self._summary_rosbag_status_label = QLabel("ROSbridge 未连接")
+        rosbag_row.addWidget(self._summary_rosbag_status_label, stretch=1)
+        record_layout.addLayout(rosbag_row)
 
         radar_path_row = QGridLayout()
         self._summary_radar_source_dir_edit = QLineEdit("")
@@ -732,6 +787,14 @@ class MainWindow(QMainWindow):
         self._summary_recording_gate_enabled = True
         self._set_summary_recording_state("STARTING", "STARTING")
         session_dir = self._create_summary_session_dir(Path(base_dir), timestamp)
+        self._summary_rosbag_session_id = ""
+        self._summary_rosbag_config = {}
+        self._summary_rosbag_start_sent = False
+        self._summary_rosbag_stop_sent = False
+        self._summary_latest_rosbag_status = {}
+
+        if self._summary_source_enabled("rosbag_raw"):
+            self._start_summary_rosbag(timestamp)
 
         try:
             if self._summary_should_record_radar():
@@ -741,6 +804,7 @@ class MainWindow(QMainWindow):
                 self._summary_radar_recording = True
                 self._summary_radar_status_label.setText(f"雷达记录中: {self._summary_radar_filename}")
         except Exception:
+            self._stop_summary_rosbag()
             self._summary_recording_gate_enabled = False
             self._summary_clock = None
             session_dir.rmdir()
@@ -766,6 +830,7 @@ class MainWindow(QMainWindow):
                 check_results=check_results,
             )
         except Exception:
+            self._stop_summary_rosbag()
             self._summary_recording_gate_enabled = False
             self._stop_summary_recording(save=False)
             if session_dir.exists():
@@ -832,6 +897,8 @@ class MainWindow(QMainWindow):
             },
             "files": self._summary_files_metadata(),
         }
+        if self._summary_source_enabled("rosbag_raw"):
+            metadata["rosbag"] = self._summary_rosbag_metadata()
         with (session_dir / "session.json").open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
@@ -839,6 +906,7 @@ class MainWindow(QMainWindow):
         self,
         session_dir: Path,
         files_metadata: dict[str, str] | None = None,
+        rosbag_metadata: dict[str, object] | None = None,
     ) -> None:
         path = session_dir / "session.json"
         if not path.exists():
@@ -854,8 +922,82 @@ class MainWindow(QMainWindow):
         metadata["dropped_pre_start_ros_messages"] = self._summary_dropped_pre_start_ros_messages
         metadata["dropped_post_stop_ros_messages"] = self._summary_dropped_post_stop_ros_messages
         metadata["files"] = files_metadata if files_metadata is not None else self._summary_files_metadata()
+        if rosbag_metadata is not None:
+            metadata["rosbag"] = rosbag_metadata
+        elif metadata.get("rosbag"):
+            metadata["rosbag"] = self._summary_rosbag_metadata()
         with path.open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
+
+    def _start_summary_rosbag(self, timestamp: str) -> None:
+        config = self._rosbag_panel.current_config()
+        session_id = f"session_{timestamp}"
+        config["session_id"] = session_id
+        config["action"] = "start_rosbag"
+        self._summary_rosbag_session_id = session_id
+        self._summary_rosbag_config = dict(config)
+        try:
+            self._ros_worker.request_rosbag_start(config)
+            self._summary_rosbag_start_sent = True
+            self._summary_rosbag_status_label.setText(f"rosbag 已发送开始: {session_id}")
+        except Exception as exc:
+            self._summary_last_warnings.append(f"rosbag_raw: start command failed: {exc}")
+            self._summary_rosbag_status_label.setText("rosbag 开始失败")
+
+    def _stop_summary_rosbag(self) -> None:
+        if not self._summary_rosbag_session_id or self._summary_rosbag_stop_sent:
+            return
+        try:
+            self._ros_worker.request_rosbag_stop(self._summary_rosbag_session_id)
+            self._summary_rosbag_stop_sent = True
+            self._summary_rosbag_status_label.setText(f"rosbag 已发送停止: {self._summary_rosbag_session_id}")
+        except Exception as exc:
+            self._summary_last_warnings.append(f"rosbag_raw: stop command failed: {exc}")
+            self._summary_rosbag_status_label.setText("rosbag 停止失败")
+
+    def _summary_rosbag_metadata(self) -> dict[str, object]:
+        config = dict(self._summary_rosbag_config)
+        latest_status = dict(self._summary_latest_rosbag_status)
+        return {
+            "enabled": self._summary_source_enabled("rosbag_raw") or bool(config),
+            "session_id": self._summary_rosbag_session_id or str(config.get("session_id", "")),
+            "bag_dir": config.get("bag_dir", DEFAULT_ROSBAG_REMOTE_DIR),
+            "remote_dir": latest_status.get("remote_dir", ""),
+            "topics": config.get("topics", []),
+            "compression": config.get("compression", ""),
+            "split_size_mb": config.get("split_size_mb", 0),
+            "start_command_sent": self._summary_rosbag_start_sent,
+            "stop_command_sent": self._summary_rosbag_stop_sent,
+            "latest_status": latest_status,
+            "remote_files": latest_status.get("bag_files", []),
+            "duration_s": latest_status.get("duration_s", 0.0),
+            "size_bytes": latest_status.get("current_size_bytes", 0),
+            "downloaded": False,
+            "local_dir": "",
+        }
+
+    def _summary_rosbag_metadata_from_context(self, context: dict[str, object]) -> dict[str, object] | None:
+        config = dict(context.get("rosbag_config", {}))
+        if not config:
+            return None
+        latest_status = dict(context.get("rosbag_latest_status", {}))
+        return {
+            "enabled": True,
+            "session_id": str(context.get("rosbag_session_id", "") or config.get("session_id", "")),
+            "bag_dir": config.get("bag_dir", DEFAULT_ROSBAG_REMOTE_DIR),
+            "remote_dir": latest_status.get("remote_dir", ""),
+            "topics": config.get("topics", []),
+            "compression": config.get("compression", ""),
+            "split_size_mb": config.get("split_size_mb", 0),
+            "start_command_sent": bool(context.get("rosbag_start_sent", False)),
+            "stop_command_sent": bool(context.get("rosbag_stop_sent", False)),
+            "latest_status": latest_status,
+            "remote_files": latest_status.get("bag_files", []),
+            "duration_s": latest_status.get("duration_s", 0.0),
+            "size_bytes": latest_status.get("current_size_bytes", 0),
+            "downloaded": False,
+            "local_dir": "",
+        }
 
     def _summary_uses_ros(self) -> bool:
         return (
@@ -921,6 +1063,8 @@ class MainWindow(QMainWindow):
             files["control_debug"] = "control_debug.csv"
         if self._summary_source_enabled("chassis_diagnostics"):
             files["chassis_diagnostics"] = "chassis_diagnostics.csv"
+        if self._summary_source_enabled("rosbag_raw"):
+            files["rosbag_manifest"] = "raw/rosbag_manifest.json"
         if self._summary_source_enabled("radar_bin"):
             files["radar_dir"] = "raw/radar"
         return files
@@ -958,6 +1102,7 @@ class MainWindow(QMainWindow):
         radar_filename = self._summary_radar_filename
         radar_source_dir_text = self._summary_radar_source_dir_edit.text().strip()
         radar_xml_path_text = self._summary_radar_xml_path_edit.text().strip()
+        self._stop_summary_rosbag()
         files_metadata = self._summary_files_metadata()
         stopped_encoder_session = self._buffer.stop_recording()
         if encoder_session is None:
@@ -970,6 +1115,16 @@ class MainWindow(QMainWindow):
         self._summary_radar_started_epoch_s = None
         self._summary_radar_started_session_elapsed_s = 0.0
         self._summary_radar_filename = ""
+        rosbag_session_id = self._summary_rosbag_session_id
+        rosbag_config = dict(self._summary_rosbag_config)
+        rosbag_start_sent = self._summary_rosbag_start_sent
+        rosbag_stop_sent = self._summary_rosbag_stop_sent
+        rosbag_latest_status = dict(self._summary_latest_rosbag_status)
+        self._summary_rosbag_session_id = ""
+        self._summary_rosbag_config = {}
+        self._summary_rosbag_start_sent = False
+        self._summary_rosbag_stop_sent = False
+        self._summary_latest_rosbag_status = {}
         self._summary_clock = None
         self._summary_topic_recorders = {}
 
@@ -993,6 +1148,11 @@ class MainWindow(QMainWindow):
             "topic_recorders": topic_recorders,
             "imu_recorder": imu_recorder,
             "files_metadata": files_metadata,
+            "rosbag_session_id": rosbag_session_id,
+            "rosbag_config": rosbag_config,
+            "rosbag_start_sent": rosbag_start_sent,
+            "rosbag_stop_sent": rosbag_stop_sent,
+            "rosbag_latest_status": rosbag_latest_status,
         }
 
     def _finalize_summary_stop_context(
@@ -1014,6 +1174,7 @@ class MainWindow(QMainWindow):
         topic_recorders = context["topic_recorders"]
         imu_recorder = context["imu_recorder"]
         files_metadata = context["files_metadata"]
+        rosbag_metadata = self._summary_rosbag_metadata_from_context(context)
         radar_stop_error = ""
         if radar_was_recording:
             try:
@@ -1035,7 +1196,11 @@ class MainWindow(QMainWindow):
             for recorders in topic_recorders.values():
                 for recorder in recorders:
                     recorder.close()
-            self._update_summary_stop_metadata(session_dir, files_metadata=files_metadata)
+            self._update_summary_stop_metadata(
+                session_dir,
+                files_metadata=files_metadata,
+                rosbag_metadata=rosbag_metadata,
+            )
             if update_ui:
                 self._set_summary_recording_state("PACKAGING", "PACKAGING")
             if radar_was_recording:
@@ -1121,6 +1286,7 @@ class MainWindow(QMainWindow):
         self._summary_last_counts.pop("encoder", None)
         self._ros_panel.set_connected(connected)
         self._ros_imu_panel.set_connected(connected)
+        self._summary_rosbag_status_label.setText("ROSbridge 已连接" if connected else "ROSbridge 未连接")
         self._status_label.setText("ROS 已连接" if connected else "ROS 已断开")
 
     def _on_ros_snapshot(self, snapshot) -> None:
@@ -1159,6 +1325,92 @@ class MainWindow(QMainWindow):
                 event.get("message", {}),
                 recv_time_epoch_s=recv_time_epoch_s,
             )
+
+    def _on_launch_manager_status(self, payload) -> None:
+        if not isinstance(payload, dict):
+            return
+        if "rosbag" in payload:
+            status = parse_rosbag_recording_status(payload)
+            self._latest_rosbag_status = status
+            self._rosbag_panel.update_recording_status(status)
+            if self._summary_rosbag_session_id and status.session_id == self._summary_rosbag_session_id:
+                self._summary_latest_rosbag_status = asdict(status)
+            if status.last_error:
+                self._status_label.setText(f"rosbag 错误: {status.last_error}")
+        if "rosbag_library" in payload:
+            library = parse_rosbag_library_state(payload)
+            self._latest_rosbag_library = library
+            self._rosbag_panel.update_library_state(library)
+
+    def _start_rosbag_sync(self, session: RemoteRosbagSession) -> None:
+        if not session.remote_dir:
+            self._status_label.setText("rosbag 同步失败: 缺少远程目录")
+            return
+        if self._summary_session_dir is not None:
+            local_dir = self._summary_session_dir / "raw" / "rosbag" / session.session_id
+        else:
+            base = Path(DEFAULT_RECORDINGS_DIR) / "rosbags"
+            local_dir = base / session.session_id
+        worker = RosbagSyncWorker(
+            host=self._summary_rosbridge_host(),
+            remote_dir=session.remote_dir,
+            local_dir=local_dir,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        self._rosbag_sync_threads.append(thread)
+        self._rosbag_sync_workers.append(worker)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_rosbag_sync_progress)
+        worker.finished.connect(lambda result, session=session: self._on_rosbag_sync_finished(session, result))
+        worker.error.connect(self._on_rosbag_sync_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(lambda: self._cleanup_rosbag_sync(thread, worker))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_rosbag_sync_progress(self, message: str) -> None:
+        self._rosbag_panel.append_log(message)
+        self._status_label.setText(message)
+
+    def _on_rosbag_sync_finished(self, session: RemoteRosbagSession, result: object) -> None:
+        data = dict(result)
+        self._rosbag_panel.append_log(f"同步完成: {data.get('method')} {data.get('local_dir')}")
+        self._status_label.setText("rosbag 同步完成")
+        self._update_rosbag_sync_metadata(session, data)
+        self._ros_worker.request_rosbag_list(DEFAULT_ROSBAG_REMOTE_DIR)
+
+    def _on_rosbag_sync_error(self, message: str) -> None:
+        self._rosbag_panel.append_log(f"同步失败: {message}")
+        self._status_label.setText(f"rosbag 同步失败: {message}")
+
+    def _cleanup_rosbag_sync(self, thread: QThread, worker: RosbagSyncWorker) -> None:
+        if thread in self._rosbag_sync_threads:
+            self._rosbag_sync_threads.remove(thread)
+        if worker in self._rosbag_sync_workers:
+            self._rosbag_sync_workers.remove(worker)
+
+    def _update_rosbag_sync_metadata(self, session: RemoteRosbagSession, result: dict[str, object]) -> None:
+        session_dir = self._summary_session_dir
+        if session_dir is None:
+            return
+        path = session_dir / "session.json"
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        rosbag = metadata.setdefault("rosbag", {})
+        if isinstance(rosbag, dict):
+            rosbag["downloaded"] = True
+            rosbag["local_dir"] = str(result.get("local_dir", ""))
+            rosbag["downloaded_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            rosbag["sync_method"] = str(result.get("method", ""))
+            rosbag["session_id"] = session.session_id
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
     def _on_refresh(self) -> None:
         time_arr, data, frame, title, footer = self._current_source_payload()
@@ -1308,6 +1560,8 @@ class MainWindow(QMainWindow):
             rows = sum(int(getattr(recorder, "rows_written", 0)) for recorder in recorders)
             if rows:
                 parts.append(f"{topic} {rows} 行")
+        if self._summary_rosbag_session_id:
+            parts.append(f"rosbag {self._summary_rosbag_session_id}")
         return "记录中: " + ", ".join(parts)
 
     def _summary_default_session_name(self) -> str:
@@ -1373,15 +1627,20 @@ class MainWindow(QMainWindow):
         return str(current or DEFAULT_FASTLIO_ODOM_TOPIC)
 
     def _summary_source_enabled(self, source_id: str) -> bool:
+        if source_id == "rosbag_raw":
+            return self._summary_rosbag_sync_cb.isChecked()
         checkbox = getattr(self, "_summary_source_checks", {}).get(source_id)
         return True if checkbox is None else checkbox.isChecked()
 
     def _selected_summary_sources(self) -> list[str]:
-        return [
+        selected = [
             source_id
             for source_id, checkbox in getattr(self, "_summary_source_checks", {}).items()
             if checkbox.isChecked()
         ]
+        if self._summary_source_enabled("rosbag_raw"):
+            selected.append("rosbag_raw")
+        return selected
 
     def _start_summary_source_check(self) -> None:
         self._summary_check_generation += 1
@@ -1496,6 +1755,14 @@ class MainWindow(QMainWindow):
             })
         if ros_specs:
             results.update(self._check_ros_sources(ros_specs))
+        if self._summary_source_enabled("rosbag_raw"):
+            results["rosbag_raw"] = {
+                "status": "ok" if self._ros_connected else "offline",
+                "estimated_hz": 0.0,
+                "has_header_stamp": False,
+                "messages_received": 0,
+                "notes": "ROSbridge 已连接，可发送车端 rosbag 命令" if self._ros_connected else "ROS 未连接",
+            }
         if self._summary_source_enabled("radar_bin"):
             results["radar_bin"] = self._check_radar_source()
 

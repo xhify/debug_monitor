@@ -91,6 +91,12 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
         if relative not in generated_files:
             generated_files.append(relative)
 
+    rosbag_manifest = _write_rosbag_manifest(session_dir, source_session)
+    if rosbag_manifest is not None:
+        manifest_relative = "raw/rosbag_manifest.json"
+        if manifest_relative not in generated_files:
+            generated_files.append(manifest_relative)
+
     if session_json_path.exists():
         source_session["generated_files"] = generated_files
         source_session["package_zip"] = str(package_zip)
@@ -112,6 +118,14 @@ def build_summary_package(session_dir: Path) -> dict[str, object]:
         "alignment": alignment_stats,
         "timings_s": timings_s,
     }
+    if rosbag_manifest is not None:
+        manifest["rosbag"] = {
+            "enabled": bool(rosbag_manifest.get("enabled", False)),
+            "session_id": rosbag_manifest.get("session_id", ""),
+            "manifest_path": "raw/rosbag_manifest.json",
+            "local_file_count": rosbag_manifest.get("local_file_count", 0),
+            "local_total_bytes": rosbag_manifest.get("local_total_bytes", 0),
+        }
 
     timings_s["zip"] = _write_zip(package_zip, session_dir, manifest, total_start)
 
@@ -143,9 +157,44 @@ def _write_zip(package_zip: Path, session_dir: Path, manifest: dict[str, object]
                 continue
             for path in base.rglob("*"):
                 if path.is_file():
+                    if path.suffix.lower() == ".bag":
+                        continue
                     archive.write(path, str(path.relative_to(session_dir)))
         elapsed = _elapsed(start)
         manifest["timings_s"]["zip"] = elapsed
         manifest["timings_s"]["total"] = _elapsed(total_start)
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     return elapsed
+
+
+def _write_rosbag_manifest(session_dir: Path, source_session: dict[str, object]) -> dict[str, object] | None:
+    rosbag = source_session.get("rosbag")
+    if not isinstance(rosbag, dict):
+        return None
+    raw_dir = session_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    manifest_path = raw_dir / "rosbag_manifest.json"
+    rosbag_manifest = dict(rosbag)
+    local_files: list[dict[str, object]] = []
+    local_dir_text = str(rosbag.get("local_dir", ""))
+    local_dir = Path(local_dir_text) if local_dir_text else session_dir / "raw" / "rosbag"
+    if local_dir.exists():
+        for path in local_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                relative = str(path.relative_to(session_dir)).replace("\\", "/")
+            except ValueError:
+                relative = str(path)
+            local_files.append(
+                {
+                    "path": relative,
+                    "size_bytes": path.stat().st_size,
+                }
+            )
+    rosbag_manifest["local_files"] = local_files
+    rosbag_manifest["local_file_count"] = len(local_files)
+    rosbag_manifest["local_total_bytes"] = sum(int(item["size_bytes"]) for item in local_files)
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(rosbag_manifest, handle, ensure_ascii=False, indent=2)
+    return rosbag_manifest

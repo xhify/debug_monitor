@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import json
 from math import cos, pi, sin
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -101,6 +102,7 @@ class RosBridgeSessionTests(unittest.TestCase):
                 ("/wheeltec/akm_state", "turn_on_wheeltec_robot/AkmState"),
                 ("/wheeltec/control_debug", "turn_on_wheeltec_robot/ControlDebug"),
                 ("/wheeltec/chassis_diagnostics", "turn_on_wheeltec_robot/ChassisDiagnostics"),
+                ("/launch_manager/status", "std_msgs/String"),
                 ("/cmd_vel", "geometry_msgs/Twist"),
                 ("/line_follow_control", "simple_follower/LineFollowControl"),
                 ("/launch_manager/command", "std_msgs/String"),
@@ -369,7 +371,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertFalse(session.connected)
         self.assertTrue(session.ros.closed)
         self.assertFalse(session.ros.terminated)
-        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:8]))
+        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:9]))
 
     def test_disconnect_tolerates_roslibpy_missing_thread_terminate_bug(self) -> None:
         session = RosBridgeSession(
@@ -385,7 +387,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertFalse(session.connected)
         self.assertTrue(session.ros.closed)
         self.assertFalse(session.ros.terminated)
-        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:8]))
+        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:9]))
 
     def test_session_can_connect_again_after_disconnect_without_restarting_reactor(self) -> None:
         session = RosBridgeSession(
@@ -405,6 +407,61 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertFalse(first_ros.terminated)
         self.assertIsNot(session.ros, first_ros)
         self.assertTrue(session.ros.run_called)
+
+    def test_launch_manager_status_parses_json_and_reports_invalid_json(self) -> None:
+        statuses = []
+        events = []
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            on_launch_manager_status=statuses.append,
+            on_message=events.append,
+        )
+        session.connect()
+
+        payload = {"rosbag": {"active": True, "session_id": "session_1"}}
+        session.topic("/launch_manager/status").callback({"data": json.dumps(payload)})
+        session.topic("/launch_manager/status").callback({"data": "not-json"})
+
+        self.assertEqual(statuses, [payload])
+        self.assertEqual(events[0]["topic"], "/launch_manager/status")
+        self.assertEqual(events[0]["message"], payload)
+        self.assertEqual(events[1]["message"]["error"], "invalid_json")
+
+    def test_rosbag_command_helpers_publish_expected_json(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.request_rosbag_start({"session_id": "session_1", "topics": ["/imu"]})
+        session.request_rosbag_stop("session_1")
+        session.request_rosbag_list("/bags")
+        session.request_rosbag_inspect("session_1")
+        session.request_rosbag_trash("session_1")
+        session.request_rosbag_delete("session_1", "session_1")
+        session.request_launch_manager_status()
+
+        commands = [
+            json.loads(message["data"])
+            for message in session.topic("/launch_manager/command").published[-7:]
+        ]
+        self.assertEqual(commands[0]["action"], "start_rosbag")
+        self.assertEqual(commands[0]["topics"], ["/imu"])
+        self.assertEqual(commands[1], {"action": "stop_rosbag", "session_id": "session_1"})
+        self.assertEqual(commands[2], {"action": "list_rosbags", "bag_dir": "/bags"})
+        self.assertEqual(commands[3], {"action": "inspect_rosbag", "session_id": "session_1"})
+        self.assertEqual(commands[4], {"action": "trash_rosbag", "session_id": "session_1"})
+        self.assertEqual(
+            commands[5],
+            {"action": "delete_rosbag", "session_id": "session_1", "confirm": "session_1"},
+        )
+        self.assertEqual(commands[6], {"action": "query_status"})
 
 
 if __name__ == "__main__":

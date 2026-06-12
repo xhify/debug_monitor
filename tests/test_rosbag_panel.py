@@ -1,0 +1,127 @@
+import os
+import sys
+import unittest
+
+from PySide6.QtWidgets import QApplication
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from rosbag_models import RemoteRosbagSession, RosbagRecordingStatus
+from widgets.rosbag_panel import RosbagPanel
+
+
+class RosbagPanelTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_current_config_uses_fastlio_defaults_and_emits_start(self) -> None:
+        panel = RosbagPanel()
+        starts = []
+        panel.start_requested.connect(starts.append)
+
+        panel._start_btn.click()
+
+        self.assertEqual(starts[0]["prefix"], "fastlio")
+        self.assertIn("/point_cloud_raw", starts[0]["topics"])
+        self.assertEqual(starts[0]["split_size_mb"], 2048)
+        self.assertEqual(starts[0]["compression"], "lz4")
+
+    def test_trajectory_environment_preset_records_motion_and_environment_topics(self) -> None:
+        panel = RosbagPanel()
+
+        index = panel._mode_combo.findData("trajectory_environment")
+        self.assertGreaterEqual(index, 0)
+        panel._mode_combo.setCurrentIndex(index)
+        config = panel.current_config()
+
+        self.assertEqual(config["prefix"], "trajectory_environment")
+        self.assertEqual(
+            config["topics"],
+            [
+                "/point_cloud_raw",
+                "/Laser_map",
+                "/imu",
+                "/active_imu",
+                "/Odometry",
+                "/odom",
+                "/path",
+                "/tf",
+                "/tf_static",
+                "/cmd_vel",
+                "/wheeltec/akm_state",
+                "/PowerVoltage",
+            ],
+        )
+
+    def test_no_fastlio_fallback_preset_excludes_fastlio_outputs(self) -> None:
+        panel = RosbagPanel()
+
+        index = panel._mode_combo.findData("fallback_no_fastlio")
+        self.assertGreaterEqual(index, 0)
+        panel._mode_combo.setCurrentIndex(index)
+        config = panel.current_config()
+
+        self.assertEqual(config["prefix"], "fallback_no_fastlio")
+        self.assertEqual(
+            config["topics"],
+            [
+                "/point_cloud_raw",
+                "/imu",
+                "/active_imu",
+                "/odom",
+                "/tf",
+                "/tf_static",
+                "/cmd_vel",
+                "/line_follow_control",
+                "/PowerVoltage",
+                "/wheeltec/akm_state",
+                "/wheeltec/control_debug",
+                "/wheeltec/chassis_diagnostics",
+            ],
+        )
+        self.assertNotIn("/Odometry", config["topics"])
+        self.assertNotIn("/path", config["topics"])
+        self.assertNotIn("/Laser_map", config["topics"])
+
+    def test_topic_editor_uses_multicolumn_checkboxes_and_counts_topics(self) -> None:
+        panel = RosbagPanel()
+
+        self.assertIn("/point_cloud_raw", panel._topic_checks)
+        self.assertIn("/Laser_map", panel._topic_checks)
+        self.assertTrue(panel._topic_checks["/point_cloud_raw"].isChecked())
+        self.assertIn("7 个 topic", panel._topic_count_label.text())
+
+    def test_topic_checkboxes_control_recorded_topics_and_custom_topics_append(self) -> None:
+        panel = RosbagPanel()
+
+        panel._topic_checks["/point_cloud_raw"].setChecked(False)
+        panel._custom_topics_edit.setText("/custom_a, /custom_b\n/custom_c")
+
+        topics = panel.current_config()["topics"]
+
+        self.assertNotIn("/point_cloud_raw", topics)
+        self.assertIn("/imu", topics)
+        self.assertEqual(topics[-3:], ["/custom_a", "/custom_b", "/custom_c"])
+        self.assertIn("9 个 topic", panel._topic_count_label.text())
+
+    def test_delete_guard_rejects_mismatched_confirm_and_active_session(self) -> None:
+        panel = RosbagPanel()
+        deletes = []
+        panel.delete_requested.connect(lambda session_id, confirm: deletes.append((session_id, confirm)))
+        session = RemoteRosbagSession(session_id="session_1", status="stopped")
+
+        self.assertFalse(panel.request_delete_for_test(session, confirm="wrong"))
+        self.assertEqual(deletes, [])
+
+        active = RemoteRosbagSession(session_id="session_2", status="recording")
+        panel.update_recording_status(RosbagRecordingStatus(active=True, session_id="session_2"))
+        self.assertFalse(panel.request_delete_for_test(active, confirm="session_2"))
+        self.assertEqual(deletes, [])
+
+        self.assertTrue(panel.request_delete_for_test(session, confirm="session_1"))
+        self.assertEqual(deletes, [("session_1", "session_1")])
+
+
+if __name__ == "__main__":
+    unittest.main()

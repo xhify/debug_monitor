@@ -109,6 +109,44 @@ class SummaryPackageTests(unittest.TestCase):
             self.assertEqual(zipped_session["package_zip"], manifest["package_zip"])
             self.assertIn("manifest.json", zipped_session["generated_files"])
 
+    def test_build_summary_package_writes_rosbag_manifest_without_bag_files_in_zip(self) -> None:
+        with temp_dir() as tmp:
+            session_dir = tmp / "session_20260612_153000"
+            rosbag_dir = session_dir / "raw" / "rosbag" / "session_20260612_153000"
+            rosbag_dir.mkdir(parents=True)
+            (rosbag_dir / "fastlio_0.bag").write_bytes(b"bag-data")
+            session_json = {
+                "session_id": "session_20260612_153000",
+                "started_at": "20260612_153000",
+                "selected_sources": ["rosbag_raw"],
+                "rosbag": {
+                    "enabled": True,
+                    "session_id": "session_20260612_153000",
+                    "remote_dir": "/home/wheeltec/bags/session_20260612_153000",
+                    "local_dir": str(rosbag_dir),
+                    "downloaded": True,
+                },
+            }
+            with (session_dir / "session.json").open("w", encoding="utf-8") as handle:
+                json.dump(session_json, handle, ensure_ascii=False, indent=2)
+
+            manifest = build_summary_package(session_dir)
+
+            manifest_path = session_dir / "raw" / "rosbag_manifest.json"
+            self.assertTrue(manifest_path.exists())
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                rosbag_manifest = json.load(handle)
+            self.assertEqual(rosbag_manifest["session_id"], "session_20260612_153000")
+            self.assertEqual(rosbag_manifest["local_file_count"], 1)
+            self.assertEqual(rosbag_manifest["local_total_bytes"], len(b"bag-data"))
+            self.assertIn("rosbag", manifest)
+            self.assertEqual(manifest["rosbag"]["manifest_path"], "raw/rosbag_manifest.json")
+
+            with zipfile.ZipFile(session_dir / "session_20260612_153000.zip") as archive:
+                names = set(archive.namelist())
+            self.assertIn("raw/rosbag_manifest.json", names)
+            self.assertNotIn("raw/rosbag/session_20260612_153000/fastlio_0.bag", names)
+
 
 if __name__ == "__main__":
     unittest.main()

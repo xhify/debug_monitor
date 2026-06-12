@@ -157,6 +157,7 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertEqual(window._imu_module_btn.text(), "IMU")
         self.assertEqual(window._ros_module_btn.text(), "ROS")
         self.assertEqual(window._ros_imu_module_btn.text(), "ROS IMU")
+        self.assertEqual(window._rosbag_module_btn.text(), "ROSBag")
         self.assertEqual(window._localization_module_btn.text(), "定位精度")
 
     def test_main_window_switches_to_localization_module(self) -> None:
@@ -209,6 +210,14 @@ class MainWindowReplayTests(unittest.TestCase):
 
         self.assertEqual(window._module_stack.currentWidget(), window._ros_imu_panel)
         self.assertTrue(window._ros_imu_module_btn.isChecked())
+
+    def test_rosbag_module_switches_to_rosbag_page(self) -> None:
+        window = MainWindow()
+
+        window._rosbag_module_btn.click()
+
+        self.assertEqual(window._module_stack.currentWidget(), window._rosbag_panel)
+        self.assertTrue(window._rosbag_module_btn.isChecked())
 
     def test_ros_snapshot_only_updates_visible_ros_page(self) -> None:
         window = MainWindow()
@@ -370,6 +379,68 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertTrue(window._summary_source_checks)
         self.assertTrue(all(check.isChecked() for check in window._summary_source_checks.values()))
 
+    def test_summary_page_exposes_rosbag_sync_checkbox(self) -> None:
+        window = MainWindow()
+
+        self.assertEqual(window._summary_rosbag_sync_cb.text(), "同步车端 rosbag 录制")
+        self.assertTrue(window._summary_rosbag_sync_cb.isChecked())
+        self.assertTrue(window._summary_source_enabled("rosbag_raw"))
+        self.assertIn("rosbag_raw", window._selected_summary_sources())
+
+        window._summary_rosbag_sync_cb.setChecked(False)
+
+        self.assertFalse(window._summary_source_enabled("rosbag_raw"))
+        self.assertNotIn("rosbag_raw", window._selected_summary_sources())
+
+    def test_launch_manager_status_updates_rosbag_panel(self) -> None:
+        window = MainWindow()
+
+        payload = {
+            "rosbag": {"active": True, "session_id": "session_1", "current_size_bytes": 1024},
+            "rosbag_library": {
+                "bag_dir": "/home/wheeltec/bags",
+                "sessions": [{"session_id": "session_1", "size_bytes": 1024}],
+            },
+        }
+        window._on_launch_manager_status(payload)
+
+        self.assertEqual(window._latest_rosbag_status.session_id, "session_1")
+        self.assertEqual(window._rosbag_panel._status_values["session_id"].text(), "session_1")
+        self.assertEqual(window._rosbag_panel._session_table.rowCount(), 1)
+
+    def test_summary_recording_sends_rosbag_start_and_stop_and_writes_metadata(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+        commands = []
+        window._ros_worker.request_rosbag_start = commands.append
+        window._ros_worker.request_rosbag_stop = lambda session_id: commands.append({"action": "stop", "session_id": session_id})
+
+        with temp_dir() as tmp:
+            session_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260612_153000")
+            window._on_launch_manager_status(
+                {
+                    "rosbag": {
+                        "active": True,
+                        "session_id": "session_20260612_153000",
+                        "remote_dir": "/home/wheeltec/bags/session_20260612_153000",
+                        "current_size_bytes": 4096,
+                        "bag_files": ["fastlio_0.bag.active"],
+                        "duration_s": 2.5,
+                    }
+                }
+            )
+            window._stop_summary_recording(save=True)
+
+            with (session_dir / "session.json").open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+
+        self.assertEqual(commands[0]["action"], "start_rosbag")
+        self.assertEqual(commands[0]["session_id"], "session_20260612_153000")
+        self.assertEqual(commands[1], {"action": "stop", "session_id": "session_20260612_153000"})
+        self.assertTrue(metadata["rosbag"]["enabled"])
+        self.assertEqual(metadata["rosbag"]["session_id"], "session_20260612_153000")
+        self.assertEqual(metadata["files"]["rosbag_manifest"], "raw/rosbag_manifest.json")
+
     def test_summary_page_defaults_trajectory_topic_to_odometry(self) -> None:
         window = MainWindow()
 
@@ -443,7 +514,7 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertIn("fastlio_odometry", result)
         self.assertEqual(result["fastlio_odometry"]["status"], "offline")
         self.assertEqual(result["radar_bin"]["status"], "skipped")
-        self.assertIn("offline 11", window._summary_check_status_label.text())
+        self.assertIn("offline 12", window._summary_check_status_label.text())
         self.assertIn("skipped 1", window._summary_check_status_label.text())
         self.assertIn("检查完成", window._summary_check_status_label.text())
 
@@ -769,14 +840,17 @@ class MainWindowReplayTests(unittest.TestCase):
         window._radar_client = radar
         window._summary_radar_sync_cb.setEnabled(True)
         window._summary_radar_sync_cb.setChecked(True)
+        stopped = []
+        window._ros_worker.request_rosbag_stop = stopped.append
 
         with temp_dir() as tmp:
             with self.assertRaises(RuntimeError):
                 window._start_summary_recording(base_dir=tmp, timestamp="20260424_153000")
 
             self.assertFalse(any(tmp.iterdir()))
-            self.assertFalse(window._is_summary_recording())
-            self.assertFalse(window._buffer.recording)
+        self.assertEqual(stopped, ["session_20260424_153000"])
+        self.assertFalse(window._is_summary_recording())
+        self.assertFalse(window._buffer.recording)
 
     def test_recording_default_filename_includes_both_motor_pid_values(self) -> None:
         window = MainWindow()
