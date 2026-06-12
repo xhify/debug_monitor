@@ -65,7 +65,7 @@ class RuntimeUiOptimizationTests(unittest.TestCase):
 
         window._on_ros_connection_changed(True)
 
-        expected = "ROSbridge: 已连接 192.168.0.14:9090 / 网络延迟: --- / 错误 3"
+        expected = "ROSbridge: 已连接 192.168.0.100:9090 / 网络延迟: --- / 错误 3"
         self.assertEqual(window._summary_rosbridge_status_label.text(), expected)
         self.assertEqual(window._ros_panel._status_label.text(), expected)
         self.assertEqual(window._ros_imu_panel._status_label.text(), expected)
@@ -162,6 +162,29 @@ class RuntimeUiOptimizationTests(unittest.TestCase):
             }
         )
         self.assertIn("网络延迟: 18.4 ms / 时钟差: -100.0 ms", window._summary_rosbridge_status_label.text())
+
+    def test_rosbridge_status_ignores_outlier_stamp_after_good_latency(self) -> None:
+        window = MainWindow()
+
+        window._on_ros_message(
+            {
+                "topic": "/odom",
+                "recv_time_epoch_s": 100.0,
+                "message": {"header": {"stamp": {"secs": 99, "nsecs": 990_000_000}}},
+            }
+        )
+        self.assertIn("消息时差: 10.0 ms", window._summary_rosbridge_status_label.text())
+
+        window._on_ros_message(
+            {
+                "topic": "/active_imu",
+                "recv_time_epoch_s": 101.1,
+                "message": {"header": {"stamp": {"secs": 107, "nsecs": 0}}},
+            }
+        )
+
+        self.assertIn("消息时差: 10.0 ms", window._summary_rosbridge_status_label.text())
+        self.assertAlmostEqual(window._ros_timestamp_outliers["/active_imu"], -5900.0)
 
     def test_localization_config_fields_keep_readable_width(self) -> None:
         window = MainWindow()

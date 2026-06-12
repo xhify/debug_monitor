@@ -713,6 +713,10 @@ def _update_ros_latency(window: Any, event: Any) -> None:
         return
     recv_time = float(event.get("recv_time_epoch_s", time()))
     latency_ms = (recv_time - ros_stamp) * 1000.0
+    topic = str(event.get("topic", ""))
+    if abs(latency_ms) > 5000.0 and getattr(window, "_ros_message_timing_text", ""):
+        _remember_ros_timestamp_outlier(window, topic, latency_ms)
+        return
     if latency_ms < 0.0 or latency_ms > 5000.0:
         sign = "+" if latency_ms > 0.0 else ""
         text = f"时钟差: {sign}{latency_ms:.1f} ms"
@@ -724,6 +728,14 @@ def _update_ros_latency(window: Any, event: Any) -> None:
     window._optimized_latency_ui_time = recv_time
     window._ros_message_timing_text = text
     _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
+
+
+def _remember_ros_timestamp_outlier(window: Any, topic: str, latency_ms: float) -> None:
+    outliers = getattr(window, "_ros_timestamp_outliers", None)
+    if outliers is None:
+        outliers = {}
+        window._ros_timestamp_outliers = outliers
+    outliers[topic or "<unknown>"] = float(latency_ms)
 
 
 def _update_topic_rate_label_for_event(window: Any, event: Any) -> None:

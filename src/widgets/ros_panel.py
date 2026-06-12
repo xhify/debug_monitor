@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 
+from app_config import DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
 from ros_bridge_worker import RosSnapshot
 from ros_data import RosCsvRecordingSession, RosTimeSeriesBuffer
 
@@ -69,14 +70,14 @@ class RosPanel(QWidget):
         connection_group = QGroupBox("rosbridge 连接")
         connection_layout = QHBoxLayout(connection_group)
         connection_layout.addWidget(QLabel("主机:"))
-        self._host_edit = QLineEdit("192.168.0.14")
+        self._host_edit = QLineEdit(DEFAULT_ROSBRIDGE_HOST)
         self._host_edit.setMinimumWidth(160)
         connection_layout.addWidget(self._host_edit)
 
         connection_layout.addWidget(QLabel("端口:"))
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1, 65535)
-        self._port_spin.setValue(9090)
+        self._port_spin.setValue(DEFAULT_ROSBRIDGE_PORT)
         connection_layout.addWidget(self._port_spin)
 
         self._connect_btn = QPushButton("连接")

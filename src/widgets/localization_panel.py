@@ -35,7 +35,12 @@ from mapping_update_client import (
     MappingUpdateConfig,
     MappingUpdateClient,
 )
-from app_config import DEFAULT_MAP_TOPIC, DEFAULT_MAP_UPDATE_PARAM
+from app_config import (
+    DEFAULT_MAP_TOPIC,
+    DEFAULT_MAP_UPDATE_PARAM,
+    DEFAULT_ROSBRIDGE_HOST,
+    DEFAULT_ROSBRIDGE_PORT,
+)
 from ros_odometry_client import RosOdometryWorker
 
 
@@ -87,13 +92,13 @@ class LocalizationPanel(QWidget):
         group = QGroupBox("FAST-LIO2 rosbridge 连接")
         row = QHBoxLayout(group)
         row.addWidget(QLabel("host:"))
-        self._host_edit = QLineEdit("192.168.0.14")
+        self._host_edit = QLineEdit(DEFAULT_ROSBRIDGE_HOST)
         self._host_edit.setMinimumWidth(160)
         row.addWidget(self._host_edit)
         row.addWidget(QLabel("port:"))
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1, 65535)
-        self._port_spin.setValue(9090)
+        self._port_spin.setValue(DEFAULT_ROSBRIDGE_PORT)
         row.addWidget(self._port_spin)
         row.addWidget(QLabel("topic:"))
         self._topic_edit = QLineEdit("/Odometry")

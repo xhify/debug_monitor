@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 import numpy as np
 import pyqtgraph as pg
 
+from app_config import DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
 from ros_bridge_worker import RosImuReading, RosSnapshot
 from ros_data import RosDualImuTimeSeriesBuffer
 
@@ -117,14 +118,14 @@ class RosImuPanel(QWidget):
         row = QHBoxLayout(group)
 
         row.addWidget(QLabel("主机:"))
-        self._host_edit = QLineEdit("192.168.0.14")
+        self._host_edit = QLineEdit(DEFAULT_ROSBRIDGE_HOST)
         self._host_edit.setMinimumWidth(160)
         row.addWidget(self._host_edit)
 
         row.addWidget(QLabel("端口:"))
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1, 65535)
-        self._port_spin.setValue(9090)
+        self._port_spin.setValue(DEFAULT_ROSBRIDGE_PORT)
         row.addWidget(self._port_spin)
 
         self._connect_btn = QPushButton("连接")
