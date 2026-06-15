@@ -408,6 +408,34 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertEqual(window._rosbag_panel._status_values["session_id"].text(), "session_1")
         self.assertEqual(window._rosbag_panel._session_table.rowCount(), 1)
 
+    def test_launch_manager_status_updates_rosbag_panel_from_nested_data(self) -> None:
+        window = MainWindow()
+
+        payload = {
+            "level": "state",
+            "message": "ok",
+            "data": {
+                "running": [],
+                "detail": {},
+                "rosbag": {"active": True, "session_id": "session_nested", "topics": ["/imu"]},
+                "rosbag_library": {"sessions": [{"session_id": "session_nested"}]},
+            },
+        }
+        window._on_launch_manager_status(payload)
+
+        self.assertEqual(window._latest_rosbag_status.session_id, "session_nested")
+        self.assertEqual(window._rosbag_panel._status_values["session_id"].text(), "session_nested")
+        self.assertEqual(window._rosbag_panel._session_table.rowCount(), 1)
+
+    def test_launch_manager_status_shows_protocol_errors(self) -> None:
+        window = MainWindow()
+
+        window._on_launch_manager_status({"level": "error", "message": "bad command", "data": {}})
+        self.assertIn("bad command", window._status_label.text())
+
+        window._on_launch_manager_status({"data": {"last_command": {"ok": False, "error": "delete denied"}}})
+        self.assertIn("delete denied", window._status_label.text())
+
     def test_summary_recording_sends_rosbag_start_and_stop_and_writes_metadata(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)

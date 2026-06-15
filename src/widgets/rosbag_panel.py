@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -143,9 +144,9 @@ class RosbagPanel(QWidget):
         group = QGroupBox("操作")
         row = QHBoxLayout(group)
         self._start_btn = QPushButton("开始车端 rosbag")
-        self._start_btn.clicked.connect(lambda: self.start_requested.emit(self.current_config()))
+        self._start_btn.clicked.connect(self._start_remote_recording)
         self._stop_btn = QPushButton("停止车端 rosbag")
-        self._stop_btn.clicked.connect(lambda: self.stop_requested.emit(self._recording_status.session_id))
+        self._stop_btn.clicked.connect(self._stop_remote_recording)
         self._list_btn = QPushButton("刷新列表")
         self._list_btn.clicked.connect(lambda: self.list_requested.emit(self._remote_dir_edit.text().strip()))
         self._query_btn = QPushButton("查询状态")
@@ -184,6 +185,7 @@ class RosbagPanel(QWidget):
     def current_config(self) -> dict[str, object]:
         return {
             "action": "start_rosbag",
+            "session_id": self._new_session_id(),
             "bag_dir": self._remote_dir_edit.text().strip() or DEFAULT_ROSBAG_REMOTE_DIR,
             "prefix": self._prefix_edit.text().strip() or "fastlio",
             "topics": self._topics(),
@@ -202,6 +204,8 @@ class RosbagPanel(QWidget):
         self._status_values["file_count"].setText(str(len(status.bag_files)))
         self._status_values["topic_count"].setText(str(len(status.topics)))
         self._status_values["last_error"].setText(status.last_error or "")
+        self._start_btn.setEnabled(not status.active)
+        self._stop_btn.setEnabled(status.active and bool(status.session_id))
 
     def update_library_state(self, library: RosbagLibraryState) -> None:
         self._sessions = list(library.sessions)
@@ -239,6 +243,16 @@ class RosbagPanel(QWidget):
                 topics.append(topic)
         return topics
 
+    def _start_remote_recording(self) -> None:
+        self.start_requested.emit(self.current_config())
+
+    def _stop_remote_recording(self) -> None:
+        session_id = self._recording_status.session_id
+        if not session_id:
+            self.append_log("没有可停止的车端 rosbag session")
+            return
+        self.stop_requested.emit(session_id)
+
     def _custom_topics(self) -> list[str]:
         return [
             token
@@ -268,6 +282,10 @@ class RosbagPanel(QWidget):
                 if topic not in topics:
                     topics.append(topic)
         return topics
+
+    @staticmethod
+    def _new_session_id() -> str:
+        return f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     def _selected_session(self) -> RemoteRosbagSession | None:
         row = self._session_table.currentRow()

@@ -22,10 +22,35 @@ class RosbagPanelTests(unittest.TestCase):
 
         panel._start_btn.click()
 
+        self.assertRegex(starts[0]["session_id"], r"^session_\d{8}_\d{6}$")
         self.assertEqual(starts[0]["prefix"], "fastlio")
-        self.assertIn("/point_cloud_raw", starts[0]["topics"])
+        self.assertIn("/point_cloud_filtered", starts[0]["topics"])
+        self.assertNotIn("/point_cloud_raw", starts[0]["topics"])
         self.assertEqual(starts[0]["split_size_mb"], 2048)
         self.assertEqual(starts[0]["compression"], "lz4")
+
+    def test_stop_button_does_not_emit_without_session_id(self) -> None:
+        panel = RosbagPanel()
+        stops = []
+        panel.stop_requested.connect(stops.append)
+
+        panel._stop_btn.click()
+
+        self.assertEqual(stops, [])
+
+    def test_recording_status_controls_start_and_stop_buttons(self) -> None:
+        panel = RosbagPanel()
+
+        self.assertTrue(panel._start_btn.isEnabled())
+        self.assertFalse(panel._stop_btn.isEnabled())
+
+        panel.update_recording_status(RosbagRecordingStatus(active=True, session_id="session_running"))
+        self.assertFalse(panel._start_btn.isEnabled())
+        self.assertTrue(panel._stop_btn.isEnabled())
+
+        panel.update_recording_status(RosbagRecordingStatus(active=False, session_id="session_done"))
+        self.assertTrue(panel._start_btn.isEnabled())
+        self.assertFalse(panel._stop_btn.isEnabled())
 
     def test_trajectory_environment_preset_records_motion_and_environment_topics(self) -> None:
         panel = RosbagPanel()
@@ -39,7 +64,7 @@ class RosbagPanelTests(unittest.TestCase):
         self.assertEqual(
             config["topics"],
             [
-                "/point_cloud_raw",
+                "/point_cloud_filtered",
                 "/Laser_map",
                 "/imu",
                 "/active_imu",
@@ -66,7 +91,7 @@ class RosbagPanelTests(unittest.TestCase):
         self.assertEqual(
             config["topics"],
             [
-                "/point_cloud_raw",
+                "/point_cloud_filtered",
                 "/imu",
                 "/active_imu",
                 "/odom",
@@ -87,15 +112,16 @@ class RosbagPanelTests(unittest.TestCase):
     def test_topic_editor_uses_multicolumn_checkboxes_and_counts_topics(self) -> None:
         panel = RosbagPanel()
 
-        self.assertIn("/point_cloud_raw", panel._topic_checks)
+        self.assertIn("/point_cloud_filtered", panel._topic_checks)
+        self.assertNotIn("/point_cloud_raw", panel._topic_checks)
         self.assertIn("/Laser_map", panel._topic_checks)
-        self.assertTrue(panel._topic_checks["/point_cloud_raw"].isChecked())
+        self.assertTrue(panel._topic_checks["/point_cloud_filtered"].isChecked())
         self.assertIn("7 个 topic", panel._topic_count_label.text())
 
     def test_topic_checkboxes_control_recorded_topics_and_custom_topics_append(self) -> None:
         panel = RosbagPanel()
 
-        panel._topic_checks["/point_cloud_raw"].setChecked(False)
+        panel._topic_checks["/point_cloud_filtered"].setChecked(False)
         panel._custom_topics_edit.setText("/custom_a, /custom_b\n/custom_c")
 
         topics = panel.current_config()["topics"]

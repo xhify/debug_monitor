@@ -430,6 +430,33 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertEqual(events[0]["message"], payload)
         self.assertEqual(events[1]["message"]["error"], "invalid_json")
 
+    def test_launch_manager_status_forwards_complete_nested_payload(self) -> None:
+        statuses = []
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            on_launch_manager_status=statuses.append,
+        )
+        session.connect()
+
+        payload = {
+            "level": "state",
+            "message": "ok",
+            "data": {
+                "running": ["rosbag"],
+                "detail": {"rosbag": "recording"},
+                "rosbag": {"active": True},
+                "rosbag_library": {"sessions": []},
+                "rosbag_detail": {"session_id": "session_1"},
+                "last_command": {"ok": True},
+            },
+        }
+        session.topic("/launch_manager/status").callback({"data": json.dumps(payload)})
+
+        self.assertEqual(statuses, [payload])
+
     def test_rosbag_command_helpers_publish_expected_json(self) -> None:
         session = RosBridgeSession(
             host="192.168.0.14",
@@ -441,19 +468,23 @@ class RosBridgeSessionTests(unittest.TestCase):
 
         session.request_rosbag_start({"session_id": "session_1", "topics": ["/imu"]})
         session.request_rosbag_stop("session_1")
+        session.request_rosbag_stop("")
         session.request_rosbag_list("/bags")
         session.request_rosbag_inspect("session_1")
         session.request_rosbag_trash("session_1")
         session.request_rosbag_delete("session_1", "session_1")
+        session.request_rosbag_delete("session_2", "wrong")
         session.request_launch_manager_status()
 
         commands = [
             json.loads(message["data"])
-            for message in session.topic("/launch_manager/command").published[-7:]
+            for message in session.topic("/launch_manager/command").published
         ]
+        self.assertEqual(len(commands), 7)
         self.assertEqual(commands[0]["action"], "start_rosbag")
         self.assertEqual(commands[0]["topics"], ["/imu"])
         self.assertEqual(commands[1], {"action": "stop_rosbag", "session_id": "session_1"})
+        self.assertFalse(any(command == {"action": "stop_rosbag", "session_id": ""} for command in commands))
         self.assertEqual(commands[2], {"action": "list_rosbags", "bag_dir": "/bags"})
         self.assertEqual(commands[3], {"action": "inspect_rosbag", "session_id": "session_1"})
         self.assertEqual(commands[4], {"action": "trash_rosbag", "session_id": "session_1"})
@@ -462,6 +493,7 @@ class RosBridgeSessionTests(unittest.TestCase):
             {"action": "delete_rosbag", "session_id": "session_1", "confirm": "session_1"},
         )
         self.assertEqual(commands[6], {"action": "query_status"})
+        self.assertFalse(any(command.get("session_id") == "session_2" for command in commands))
 
 
 if __name__ == "__main__":

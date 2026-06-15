@@ -43,7 +43,7 @@ class RosbagLibraryState:
 
 
 def parse_rosbag_recording_status(payload: dict[str, Any]) -> RosbagRecordingStatus:
-    data = payload.get("rosbag", payload)
+    data = _protocol_section(payload, "rosbag")
     if not isinstance(data, dict):
         data = {}
     return RosbagRecordingStatus(
@@ -61,7 +61,7 @@ def parse_rosbag_recording_status(payload: dict[str, Any]) -> RosbagRecordingSta
 
 
 def parse_rosbag_library_state(payload: dict[str, Any]) -> RosbagLibraryState:
-    data = payload.get("rosbag_library", payload)
+    data = _protocol_section(payload, "rosbag_library")
     if not isinstance(data, dict):
         data = {}
     sessions: list[RemoteRosbagSession] = []
@@ -90,6 +90,25 @@ def parse_rosbag_library_state(payload: dict[str, Any]) -> RosbagLibraryState:
         disk_free_gb=_float(data.get("disk_free_gb")),
         sessions=sessions,
     )
+
+
+def rosbag_protocol_data(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get("data", payload)
+    return data if isinstance(data, dict) else {}
+
+
+def extract_rosbag_protocol_error(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    data = rosbag_protocol_data(payload)
+    last_command = data.get("last_command", {})
+    if isinstance(last_command, dict) and last_command.get("ok") is False:
+        return _str(last_command.get("error") or last_command.get("message"))
+    if payload.get("level") == "error":
+        return _str(payload.get("message"))
+    return ""
 
 
 def format_bytes(size_bytes: int) -> str:
@@ -139,3 +158,21 @@ def _str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [_str(item) for item in value]
+
+
+def _protocol_section(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    data = rosbag_protocol_data(payload)
+    section = data.get(key)
+    if isinstance(section, dict):
+        return section
+    if _is_launch_manager_envelope(payload) or _is_launch_manager_data(data):
+        return {}
+    return data
+
+
+def _is_launch_manager_envelope(payload: dict[str, Any]) -> bool:
+    return any(key in payload for key in ("level", "message", "data"))
+
+
+def _is_launch_manager_data(data: dict[str, Any]) -> bool:
+    return any(key in data for key in ("running", "detail", "rosbag", "rosbag_library", "rosbag_detail", "last_command"))

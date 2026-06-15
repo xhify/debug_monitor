@@ -36,7 +36,7 @@ ROSBAG_TOPIC_PRESETS = {
         "/tf_static",
     ],
     "fastlio": [
-        "/point_cloud_raw",
+        "/point_cloud_filtered",
         "/imu",
         "/Odometry",
         "/path",
@@ -45,7 +45,7 @@ ROSBAG_TOPIC_PRESETS = {
         "/tf_static",
     ],
     "trajectory_environment": [
-        "/point_cloud_raw",
+        "/point_cloud_filtered",
         "/Laser_map",
         "/imu",
         "/active_imu",
@@ -59,7 +59,7 @@ ROSBAG_TOPIC_PRESETS = {
         "/PowerVoltage",
     ],
     "fallback_no_fastlio": [
-        "/point_cloud_raw",
+        "/point_cloud_filtered",
         "/imu",
         "/active_imu",
         "/odom",
@@ -73,7 +73,7 @@ ROSBAG_TOPIC_PRESETS = {
         "/wheeltec/chassis_diagnostics",
     ],
     "full": [
-        "/point_cloud_raw",
+        "/point_cloud_filtered",
         "/imu",
         "/active_imu",
         "/odom",

@@ -223,6 +223,8 @@ class RosBridgeSession:
         self._publish_launch_manager_json(payload)
 
     def request_rosbag_stop(self, session_id: str) -> None:
+        if not session_id:
+            return
         self._publish_launch_manager_json({"action": "stop_rosbag", "session_id": session_id})
 
     def request_rosbag_list(self, bag_dir: str = "/home/wheeltec/bags") -> None:
@@ -235,6 +237,8 @@ class RosBridgeSession:
         self._publish_launch_manager_json({"action": "trash_rosbag", "session_id": session_id})
 
     def request_rosbag_delete(self, session_id: str, confirm: str) -> None:
+        if confirm != session_id:
+            return
         self._publish_launch_manager_json(
             {"action": "delete_rosbag", "session_id": session_id, "confirm": confirm}
         )

@@ -49,8 +49,10 @@ from rosbag_models import (
     RemoteRosbagSession,
     RosbagLibraryState,
     RosbagRecordingStatus,
+    extract_rosbag_protocol_error,
     parse_rosbag_library_state,
     parse_rosbag_recording_status,
+    rosbag_protocol_data,
 )
 from rosbag_sync_worker import RosbagSyncWorker
 from ros_topic_recorders import (
@@ -1329,7 +1331,12 @@ class MainWindow(QMainWindow):
     def _on_launch_manager_status(self, payload) -> None:
         if not isinstance(payload, dict):
             return
-        if "rosbag" in payload:
+        data = rosbag_protocol_data(payload)
+        protocol_error = extract_rosbag_protocol_error(payload)
+        if protocol_error:
+            self._status_label.setText(f"rosbag 错误: {protocol_error}")
+            self._rosbag_panel.append_log(protocol_error)
+        if isinstance(data.get("rosbag"), dict):
             status = parse_rosbag_recording_status(payload)
             self._latest_rosbag_status = status
             self._rosbag_panel.update_recording_status(status)
@@ -1337,7 +1344,7 @@ class MainWindow(QMainWindow):
                 self._summary_latest_rosbag_status = asdict(status)
             if status.last_error:
                 self._status_label.setText(f"rosbag 错误: {status.last_error}")
-        if "rosbag_library" in payload:
+        if isinstance(data.get("rosbag_library"), dict):
             library = parse_rosbag_library_state(payload)
             self._latest_rosbag_library = library
             self._rosbag_panel.update_library_state(library)
