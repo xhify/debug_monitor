@@ -67,6 +67,8 @@ class Hr23RadarClientTests(unittest.TestCase):
                     prepare_cmd_send_epoch_s=1781188199.9,
                     prepare_cmd_send_perf_s=12345.5,
                     metadata={"experimentNote": "直线测试"},
+                    recording_start_epoch_s=1781188198.4,
+                    recording_start_perf_s=12344.0,
                 )["state"],
                 "prepared",
             )
@@ -79,6 +81,22 @@ class Hr23RadarClientTests(unittest.TestCase):
         self.assertEqual(prepare_request["metadata"]["source"], "debug_monitor")
         self.assertEqual(prepare_request["metadata"]["experimentNote"], "直线测试")
         self.assertEqual(prepare_request["timeBase"]["master"], "debug_monitor")
+        self.assertEqual(prepare_request["timeBase"]["recordingStartEpochS"], 1781188198.4)
+        self.assertEqual(prepare_request["timeBase"]["recordingStartPerfS"], 12344.0)
+        self.assertEqual(prepare_request["timeBase"]["prepareCmdSendEpochS"], 1781188199.9)
+        self.assertEqual(prepare_request["timeBase"]["prepareCmdSendPerfS"], 12345.5)
+
+    def test_prepare_falls_back_to_prepare_send_time_base(self) -> None:
+        with FakeJsonLinesServer([{"ok": True, "state": "prepared"}]) as server:
+            Hr23RadarClient(server.host, server.port, timeout=1.0).prepare(
+                session_id="session_fallback",
+                output_dir=Path("recordings/session_fallback/raw/hr23_radar"),
+                prepare_cmd_send_epoch_s=1781188201.25,
+                prepare_cmd_send_perf_s=54321.75,
+            )
+        time_base = server.requests[0]["timeBase"]
+        self.assertEqual(time_base["recordingStartEpochS"], 1781188201.25)
+        self.assertEqual(time_base["recordingStartPerfS"], 54321.75)
 
     def test_ok_false_raises_error_with_protocol_context(self) -> None:
         response = {
