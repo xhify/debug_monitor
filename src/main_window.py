@@ -39,6 +39,7 @@ from app_config import DEFAULT_FASTLIO_ODOM_TOPIC, DEFAULT_RECORDINGS_DIR
 from akm_topic_recorders import AkmStateRecorder, ChassisDiagnosticsRecorder, ControlDebugRecorder
 from analytics import compute_channel_metrics
 from data_buffer import COL_FINAL_A, COL_FINAL_B, COL_TGT_A, COL_TGT_B, DataBuffer
+from hr23_radar_client import Hr23RadarClient, Hr23RadarError
 from recording_session import RecordingSession
 from radar_bin_parser import parse_radar_recording
 from radar_scpi import RadarScpiClient
@@ -142,6 +143,10 @@ class MainWindow(QMainWindow):
         self._ros_topic_frame_counts: dict[str, int] = {}
         self._ros_connected = False
         self._radar_client = RadarScpiClient()
+        self._hr23_radar_client_factory = Hr23RadarClient
+        self._summary_hr23_session_client = None
+        self._summary_hr23_active = False
+        self._summary_hr23_session_metadata: dict[str, object] = {}
 
         self._setup_ui()
         self._setup_timers()
@@ -499,7 +504,44 @@ class MainWindow(QMainWindow):
             checkbox.setChecked(True)
             self._summary_source_checks[source_id] = checkbox
             layout.addWidget(checkbox, index // 2, index % 2)
+        hr23_row = (len(source_items) + 1) // 2
+        hr23_checkbox = QCheckBox("新谐波雷达 HR2.3")
+        hr23_checkbox.setChecked(False)
+        self._summary_source_checks["hr23_radar"] = hr23_checkbox
+        layout.addWidget(hr23_checkbox, hr23_row, 0)
+        layout.addWidget(self._build_summary_hr23_controls(), hr23_row, 1)
         return group
+
+    def _build_summary_hr23_controls(self) -> QWidget:
+        controls = QWidget()
+        layout = QHBoxLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._summary_hr23_state_label = QLabel("state: ---")
+        self._summary_hr23_packets_label = QLabel("packets: 0")
+        self._summary_hr23_bytes_label = QLabel("bytes: 0")
+        self._summary_hr23_last_packet_label = QLabel("lastPacketUtc: ---")
+        self._summary_hr23_host_edit = QLineEdit("127.0.0.1")
+        self._summary_hr23_host_edit.setMaximumWidth(120)
+        self._summary_hr23_port_edit = QLineEdit("7070")
+        self._summary_hr23_port_edit.setMaximumWidth(64)
+        self._summary_hr23_test_btn = QPushButton("测试")
+        self._summary_hr23_test_btn.clicked.connect(self._test_summary_hr23_connection)
+
+        for widget in (
+            self._summary_hr23_state_label,
+            self._summary_hr23_packets_label,
+            self._summary_hr23_bytes_label,
+            self._summary_hr23_last_packet_label,
+        ):
+            layout.addWidget(widget)
+        layout.addWidget(QLabel("host:"))
+        layout.addWidget(self._summary_hr23_host_edit)
+        layout.addWidget(QLabel("port:"))
+        layout.addWidget(self._summary_hr23_port_edit)
+        layout.addWidget(self._summary_hr23_test_btn)
+        return controls
 
     def _build_summary_device_group(self, key: str, title: str, bauds: list[int]) -> QGroupBox:
         group = QGroupBox(title)
@@ -693,6 +735,74 @@ class MainWindow(QMainWindow):
         self._summary_radar_status_label.setText(f"雷达已连接: {response}")
         self._status_label.setText("雷达连接测试通过")
 
+    def _make_hr23_radar_client(self):
+        host = self._summary_hr23_host_edit.text().strip() or "127.0.0.1"
+        try:
+            port = int(self._summary_hr23_port_edit.text().strip())
+        except ValueError as exc:
+            raise Hr23RadarError("cmd=status state= error=invalid port message=port must be an integer") from exc
+        if not 1 <= port <= 65535:
+            raise Hr23RadarError("cmd=status state= error=invalid port message=port must be 1..65535")
+        return self._hr23_radar_client_factory(host=host, port=port, timeout=2.0)
+
+    def _test_summary_hr23_connection(self) -> None:
+        try:
+            response = self._make_hr23_radar_client().status()
+        except Exception as exc:
+            self._update_summary_hr23_status(error=str(exc))
+            self._status_label.setText(f"HR2.3 连接失败: {exc}")
+            return
+        self._update_summary_hr23_status(response)
+        self._status_label.setText("HR2.3 连接测试通过")
+
+    def _update_summary_hr23_status(
+        self,
+        response: dict[str, object] | None = None,
+        error: str = "",
+    ) -> None:
+        response = response or {}
+        state = "error" if error else str(response.get("state", "---"))
+        self._summary_hr23_state_label.setText(f"state: {state}")
+        self._summary_hr23_packets_label.setText(f"packets: {response.get('packetCount', 0)}")
+        self._summary_hr23_bytes_label.setText(f"bytes: {response.get('totalBytes', 0)}")
+        last_packet = response.get("lastPacketUtc", "---")
+        self._summary_hr23_last_packet_label.setText(f"lastPacketUtc: {last_packet}")
+        self._summary_hr23_state_label.setToolTip(error)
+
+    def _new_hr23_session_metadata(self, session_id: str, enabled: bool) -> dict[str, object]:
+        try:
+            port = int(self._summary_hr23_port_edit.text().strip())
+        except ValueError:
+            port = 7070
+        return {
+            "enabled": enabled,
+            "host": self._summary_hr23_host_edit.text().strip() or "127.0.0.1",
+            "port": port,
+            "session_id": session_id,
+            "capture_dir": "raw/hr23_radar",
+            "files": {
+                "raw": "raw/hr23_radar/raw.dat",
+                "packets": "raw/hr23_radar/packets.csv",
+                "events": "raw/hr23_radar/events.csv",
+                "metadata": "raw/hr23_radar/metadata.json",
+            },
+            "error": "",
+            "stop_error": "",
+        }
+
+    @staticmethod
+    def _merge_hr23_response(metadata: dict[str, object], response: dict[str, object]) -> None:
+        for key in (
+            "packetCount",
+            "totalBytes",
+            "firstPacketUtc",
+            "lastPacketUtc",
+            "rawFileClosedUtc",
+            "time",
+        ):
+            if key in response:
+                metadata[key] = response[key]
+
     def _summary_should_record_radar(self) -> bool:
         return (
             self._summary_source_enabled("radar_bin")
@@ -732,7 +842,51 @@ class MainWindow(QMainWindow):
         self._summary_recording_gate_enabled = True
         self._set_summary_recording_state("STARTING", "STARTING")
         session_dir = self._create_summary_session_dir(Path(base_dir), timestamp)
+        session_id = f"session_{timestamp}"
+        note = self._summary_note_edit.toPlainText().strip()
+        hr23_enabled = self._summary_source_enabled("hr23_radar")
+        self._summary_hr23_session_metadata = self._new_hr23_session_metadata(session_id, hr23_enabled)
+        self._summary_hr23_session_client = None
+        self._summary_hr23_active = False
 
+        if hr23_enabled:
+            hr23_output_dir = session_dir / "raw" / "hr23_radar"
+            hr23_output_dir.mkdir(parents=True)
+            try:
+                hr23_client = self._make_hr23_radar_client()
+                self._summary_hr23_session_client = hr23_client
+                prepare_cmd_send_epoch_s = time()
+                prepare_cmd_send_perf_s = perf_counter()
+                self._summary_hr23_session_metadata["prepare_cmd_send_epoch_s"] = prepare_cmd_send_epoch_s
+                self._summary_hr23_session_metadata["prepare_cmd_send_perf_s"] = prepare_cmd_send_perf_s
+                prepare_response = hr23_client.prepare(
+                    session_id=session_id,
+                    output_dir=hr23_output_dir,
+                    prepare_cmd_send_epoch_s=prepare_cmd_send_epoch_s,
+                    prepare_cmd_send_perf_s=prepare_cmd_send_perf_s,
+                    metadata={"experimentNote": note, "operator": ""},
+                )
+                self._summary_hr23_session_metadata["prepare_ack_recv_epoch_s"] = time()
+                self._merge_hr23_response(self._summary_hr23_session_metadata, prepare_response)
+                self._summary_hr23_active = True
+                self._update_summary_hr23_status(prepare_response)
+            except Exception as exc:
+                self._summary_hr23_session_metadata["error"] = str(exc)
+                self._summary_recording_gate_enabled = False
+                self._summary_clock = None
+                self._summary_hr23_session_client = None
+                self._summary_hr23_active = False
+                self._update_summary_hr23_status(error=str(exc))
+                try:
+                    hr23_output_dir.rmdir()
+                    hr23_output_dir.parent.rmdir()
+                    session_dir.rmdir()
+                except OSError:
+                    pass
+                self._set_summary_recording_state("ERROR", f"HR2.3 prepare 失败: {exc}")
+                raise RuntimeError(f"HR2.3 prepare 失败: {exc}") from exc
+
+        self._summary_session_dir = session_dir
         try:
             if self._summary_should_record_radar():
                 self._summary_radar_started_epoch_s = self._summary_clock.now_epoch_s()
@@ -742,13 +896,18 @@ class MainWindow(QMainWindow):
                 self._summary_radar_status_label.setText(f"雷达记录中: {self._summary_radar_filename}")
         except Exception:
             self._summary_recording_gate_enabled = False
-            self._summary_clock = None
-            session_dir.rmdir()
+            try:
+                self._stop_summary_recording(save=False)
+            except Exception:
+                pass
+            try:
+                session_dir.rmdir()
+            except OSError:
+                pass
             self._set_summary_recording_state("ERROR", "启动失败")
             raise
 
         try:
-            self._summary_session_dir = session_dir
             self._summary_topic_recorders = self._create_summary_topic_recorders(session_dir)
             if self._summary_source("encoder") == "serial" and self._summary_source_enabled("serial_encoder"):
                 encoder_session = RecordingSession(base_dir=session_dir)
@@ -756,9 +915,14 @@ class MainWindow(QMainWindow):
                 self._buffer.start_recording(encoder_session)
                 self._summary_encoder_session = encoder_session
 
-            note = self._summary_note_edit.toPlainText().strip()
             if self._summary_uses_serial_imu():
                 self._imu_panel.start_recording_in_directory(session_dir, started_at=timestamp, note=note)
+            if self._summary_hr23_active:
+                self._summary_hr23_session_metadata["start_cmd_send_epoch_s"] = time()
+                start_response = self._summary_hr23_session_client.start()
+                self._summary_hr23_session_metadata["start_ack_recv_epoch_s"] = time()
+                self._merge_hr23_response(self._summary_hr23_session_metadata, start_response)
+                self._update_summary_hr23_status(start_response)
             self._write_summary_metadata(
                 session_dir=session_dir,
                 started_at=timestamp,
@@ -767,9 +931,15 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             self._summary_recording_gate_enabled = False
-            self._stop_summary_recording(save=False)
+            try:
+                self._stop_summary_recording(save=False)
+            except Exception:
+                pass
             if session_dir.exists():
-                session_dir.rmdir()
+                try:
+                    session_dir.rmdir()
+                except OSError:
+                    pass
             self._set_summary_recording_state("ERROR", "启动失败")
             raise
 
@@ -829,6 +999,7 @@ class MainWindow(QMainWindow):
                 "imu_A": self._summary_device_metadata("imu_A"),
                 "imu_B": self._summary_device_metadata("imu_B"),
                 "radar": self._summary_radar_metadata(),
+                "hr23_radar": dict(self._summary_hr23_session_metadata),
             },
             "files": self._summary_files_metadata(),
         }
@@ -839,6 +1010,7 @@ class MainWindow(QMainWindow):
         self,
         session_dir: Path,
         files_metadata: dict[str, str] | None = None,
+        hr23_metadata: dict[str, object] | None = None,
     ) -> None:
         path = session_dir / "session.json"
         if not path.exists():
@@ -854,6 +1026,8 @@ class MainWindow(QMainWindow):
         metadata["dropped_pre_start_ros_messages"] = self._summary_dropped_pre_start_ros_messages
         metadata["dropped_post_stop_ros_messages"] = self._summary_dropped_post_stop_ros_messages
         metadata["files"] = files_metadata if files_metadata is not None else self._summary_files_metadata()
+        if hr23_metadata is not None:
+            metadata.setdefault("devices", {})["hr23_radar"] = hr23_metadata
         with path.open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
@@ -923,6 +1097,8 @@ class MainWindow(QMainWindow):
             files["chassis_diagnostics"] = "chassis_diagnostics.csv"
         if self._summary_source_enabled("radar_bin"):
             files["radar_dir"] = "raw/radar"
+        if self._summary_source_enabled("hr23_radar"):
+            files["hr23_radar_dir"] = "raw/hr23_radar"
         return files
 
     @staticmethod
@@ -959,6 +1135,9 @@ class MainWindow(QMainWindow):
         radar_source_dir_text = self._summary_radar_source_dir_edit.text().strip()
         radar_xml_path_text = self._summary_radar_xml_path_edit.text().strip()
         files_metadata = self._summary_files_metadata()
+        hr23_active = self._summary_hr23_active
+        hr23_client = self._summary_hr23_session_client
+        hr23_metadata = dict(self._summary_hr23_session_metadata)
         stopped_encoder_session = self._buffer.stop_recording()
         if encoder_session is None:
             encoder_session = stopped_encoder_session
@@ -970,6 +1149,9 @@ class MainWindow(QMainWindow):
         self._summary_radar_started_epoch_s = None
         self._summary_radar_started_session_elapsed_s = 0.0
         self._summary_radar_filename = ""
+        self._summary_hr23_active = False
+        self._summary_hr23_session_client = None
+        self._summary_hr23_session_metadata = {}
         self._summary_clock = None
         self._summary_topic_recorders = {}
 
@@ -990,6 +1172,9 @@ class MainWindow(QMainWindow):
             "radar_filename": radar_filename,
             "radar_source_dir_text": radar_source_dir_text,
             "radar_xml_path_text": radar_xml_path_text,
+            "hr23_active": hr23_active,
+            "hr23_client": hr23_client,
+            "hr23_metadata": hr23_metadata,
             "topic_recorders": topic_recorders,
             "imu_recorder": imu_recorder,
             "files_metadata": files_metadata,
@@ -1014,6 +1199,9 @@ class MainWindow(QMainWindow):
         topic_recorders = context["topic_recorders"]
         imu_recorder = context["imu_recorder"]
         files_metadata = context["files_metadata"]
+        hr23_active = bool(context["hr23_active"])
+        hr23_client = context["hr23_client"]
+        hr23_metadata = dict(context["hr23_metadata"])
         radar_stop_error = ""
         if radar_was_recording:
             try:
@@ -1025,6 +1213,26 @@ class MainWindow(QMainWindow):
                 if update_ui:
                     self._summary_radar_status_label.setText(radar_stop_error)
 
+        hr23_stop_error = ""
+        if hr23_active:
+            hr23_metadata["stop_cmd_send_epoch_s"] = time()
+            try:
+                stop_response = hr23_client.stop()
+                hr23_metadata["stop_ack_recv_epoch_s"] = time()
+                if stop_response.get("state") != "stopped":
+                    raise Hr23RadarError(
+                        "cmd=stop state="
+                        f"{stop_response.get('state', '')} error=invalid state message=expected stopped"
+                    )
+                self._merge_hr23_response(hr23_metadata, stop_response)
+                hr23_metadata["stop_response"] = dict(stop_response)
+                self._update_summary_hr23_status(stop_response)
+            except Exception as exc:
+                hr23_stop_error = str(exc)
+                hr23_metadata["stop_error"] = hr23_stop_error
+                hr23_metadata["error"] = hr23_stop_error
+                self._update_summary_hr23_status(error=hr23_stop_error)
+
         if save and session_dir is not None:
             if encoder_session is not None:
                 encoder_session.finalize(session_dir / "encoder.csv")
@@ -1035,7 +1243,16 @@ class MainWindow(QMainWindow):
             for recorders in topic_recorders.values():
                 for recorder in recorders:
                     recorder.close()
-            self._update_summary_stop_metadata(session_dir, files_metadata=files_metadata)
+            self._update_summary_stop_metadata(
+                session_dir,
+                files_metadata=files_metadata,
+                hr23_metadata=hr23_metadata,
+            )
+            if hr23_stop_error:
+                if update_ui:
+                    self._set_summary_recording_state("ERROR", "HR2.3 stop 失败")
+                    self._status_label.setText(f"HR2.3 stop 失败: {hr23_stop_error}")
+                raise RuntimeError(f"HR2.3 stop 失败: {hr23_stop_error}")
             if update_ui:
                 self._set_summary_recording_state("PACKAGING", "PACKAGING")
             if radar_was_recording:
@@ -1498,6 +1715,8 @@ class MainWindow(QMainWindow):
             results.update(self._check_ros_sources(ros_specs))
         if self._summary_source_enabled("radar_bin"):
             results["radar_bin"] = self._check_radar_source()
+        if self._summary_source_enabled("hr23_radar"):
+            results["hr23_radar"] = self._check_hr23_radar_source()
 
         if update_ui:
             self._apply_summary_check_results(results)
@@ -1654,6 +1873,31 @@ class MainWindow(QMainWindow):
             "has_header_stamp": False,
             "messages_received": 0,
             "notes": "; ".join(notes),
+        }
+
+    def _check_hr23_radar_source(self) -> dict[str, object]:
+        try:
+            response = self._make_hr23_radar_client().status()
+        except Exception as exc:
+            self._update_summary_hr23_status(error=str(exc))
+            return {
+                "status": "offline",
+                "estimated_hz": 0.0,
+                "has_header_stamp": False,
+                "messages_received": 0,
+                "notes": str(exc),
+            }
+        self._update_summary_hr23_status(response)
+        state = str(response.get("state", ""))
+        status = "error" if state in {"recording", "stopping"} else "ok"
+        packet_count = int(response.get("packetCount", 0) or 0)
+        total_bytes = int(response.get("totalBytes", 0) or 0)
+        return {
+            "status": status,
+            "estimated_hz": 0.0,
+            "has_header_stamp": False,
+            "messages_received": packet_count,
+            "notes": f"state={state}, packetCount={packet_count}, totalBytes={total_bytes}",
         }
 
     def _create_summary_topic_recorders(self, session_dir: Path) -> dict[str, list[object]]:

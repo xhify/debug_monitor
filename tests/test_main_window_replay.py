@@ -83,6 +83,51 @@ class FakeRadarClient:
         self.stopped += 1
 
 
+class FakeHr23RadarClient:
+    def __init__(self, fail_stop: bool = False) -> None:
+        self.fail_stop = fail_stop
+        self.calls: list[tuple[str, object]] = []
+
+    def status(self) -> dict[str, object]:
+        self.calls.append(("status", None))
+        return {
+            "ok": True,
+            "state": "idle",
+            "packetCount": 3,
+            "totalBytes": 96,
+            "lastPacketUtc": "2026-06-12T15:30:00Z",
+        }
+
+    def prepare(self, **kwargs) -> dict[str, object]:
+        self.calls.append(("prepare", kwargs))
+        return {"ok": True, "state": "prepared"}
+
+    def start(self) -> dict[str, object]:
+        self.calls.append(("start", None))
+        return {"ok": True, "state": "recording"}
+
+    def stop(self) -> dict[str, object]:
+        self.calls.append(("stop", None))
+        if self.fail_stop:
+            raise RuntimeError("recorder stop timeout")
+        return {
+            "ok": True,
+            "state": "stopped",
+            "packetCount": 8,
+            "totalBytes": 256,
+            "firstPacketUtc": "2026-06-12T15:30:01Z",
+            "lastPacketUtc": "2026-06-12T15:30:02Z",
+            "rawFileClosedUtc": "2026-06-12T15:30:03Z",
+            "files": {
+                "raw": "raw.dat",
+                "packets": "packets.csv",
+                "events": "events.csv",
+                "metadata": "metadata.json",
+            },
+            "time": {"durationS": 1.0},
+        }
+
+
 def make_radar_big_frame(offset: int = 0) -> bytes:
     import numpy as np
 
@@ -368,7 +413,12 @@ class MainWindowReplayTests(unittest.TestCase):
         window = MainWindow()
 
         self.assertTrue(window._summary_source_checks)
-        self.assertTrue(all(check.isChecked() for check in window._summary_source_checks.values()))
+        self.assertFalse(window._summary_source_checks["hr23_radar"].isChecked())
+        self.assertTrue(all(
+            check.isChecked()
+            for source_id, check in window._summary_source_checks.items()
+            if source_id != "hr23_radar"
+        ))
 
     def test_summary_page_defaults_trajectory_topic_to_odometry(self) -> None:
         window = MainWindow()
@@ -386,6 +436,79 @@ class MainWindowReplayTests(unittest.TestCase):
 
         self.assertTrue(hasattr(window, "_summary_radar_source_dir_edit"))
         self.assertTrue(hasattr(window, "_summary_radar_xml_path_edit"))
+
+    def test_summary_page_exposes_hr23_radar_source_unchecked_by_default(self) -> None:
+        window = MainWindow()
+
+        self.assertIn("hr23_radar", window._summary_source_checks)
+        self.assertFalse(window._summary_source_checks["hr23_radar"].isChecked())
+        self.assertEqual(window._summary_hr23_host_edit.text(), "127.0.0.1")
+        self.assertEqual(window._summary_hr23_port_edit.text(), "7070")
+        self.assertEqual(window._summary_hr23_test_btn.text(), "测试")
+
+    def test_hr23_radar_test_button_displays_status_fields(self) -> None:
+        window = MainWindow()
+        fake = FakeHr23RadarClient()
+        window._hr23_radar_client_factory = lambda **_kwargs: fake
+
+        window._test_summary_hr23_connection()
+
+        self.assertEqual(fake.calls, [("status", None)])
+        self.assertIn("idle", window._summary_hr23_state_label.text())
+        self.assertIn("3", window._summary_hr23_packets_label.text())
+        self.assertIn("96", window._summary_hr23_bytes_label.text())
+        self.assertIn("2026-06-12T15:30:00Z", window._summary_hr23_last_packet_label.text())
+
+    def test_summary_recording_controls_hr23_and_writes_separate_metadata(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+        fake = FakeHr23RadarClient()
+        window._hr23_radar_client_factory = lambda **_kwargs: fake
+        window._summary_source_checks["hr23_radar"].setChecked(True)
+
+        with temp_dir() as tmp:
+            session_dir = window._start_summary_recording(
+                base_dir=tmp,
+                timestamp="20260612_153000",
+            )
+            self.assertTrue((session_dir / "raw" / "hr23_radar").is_dir())
+            window._stop_summary_recording(save=True)
+
+            self.assertEqual([call[0] for call in fake.calls], ["prepare", "start", "stop"])
+            prepare_kwargs = fake.calls[0][1]
+            self.assertEqual(prepare_kwargs["session_id"], "session_20260612_153000")
+            self.assertEqual(prepare_kwargs["output_dir"], session_dir / "raw" / "hr23_radar")
+
+            with (session_dir / "session.json").open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            hr23 = metadata["devices"]["hr23_radar"]
+            self.assertTrue(hr23["enabled"])
+            self.assertEqual(hr23["capture_dir"], "raw/hr23_radar")
+            self.assertEqual(hr23["packetCount"], 8)
+            self.assertEqual(hr23["totalBytes"], 256)
+            self.assertEqual(hr23["firstPacketUtc"], "2026-06-12T15:30:01Z")
+            self.assertEqual(metadata["files"]["hr23_radar_dir"], "raw/hr23_radar")
+            self.assertEqual(metadata["devices"]["radar"]["enabled"], False)
+
+    def test_hr23_stop_failure_writes_error_and_skips_packaging(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+        fake = FakeHr23RadarClient(fail_stop=True)
+        window._hr23_radar_client_factory = lambda **_kwargs: fake
+        window._summary_source_checks["hr23_radar"].setChecked(True)
+
+        with temp_dir() as tmp:
+            session_dir = window._start_summary_recording(
+                base_dir=tmp,
+                timestamp="20260612_154000",
+            )
+            with self.assertRaisesRegex(RuntimeError, "HR2.3 stop 失败"):
+                window._stop_summary_recording(save=True)
+
+            with (session_dir / "session.json").open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            self.assertIn("recorder stop timeout", metadata["devices"]["hr23_radar"]["stop_error"])
+            self.assertFalse((session_dir / f"{session_dir.name}.zip").exists())
 
     def test_background_task_retains_worker_until_completion(self) -> None:
         window = MainWindow()

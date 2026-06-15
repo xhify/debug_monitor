@@ -228,10 +228,16 @@ def _patch_main_window(cls: type) -> None:
             ("imu_A", "串口 IMU A"),
             ("imu_B", "串口 IMU B"),
             ("radar_bin", "谐波雷达 .bin"),
+            ("hr23_radar", "新谐波雷达 HR2.3"),
         ]
 
         for row_index, (source_id, label) in enumerate(source_items):
             checkbox = self._make_summary_source_checkbox(source_id, label)
+            if source_id == "hr23_radar":
+                self._summary_source_checks[source_id] = checkbox
+                layout.addWidget(checkbox, row_index, 0)
+                layout.addWidget(self._build_summary_hr23_controls(), row_index, 1, 1, 2)
+                continue
             rate_label = QLabel("---")
             detail_label = QLabel("")
             detail_label.setStyleSheet("color: #666;")
@@ -258,7 +264,7 @@ def _patch_main_window(cls: type) -> None:
         from PySide6.QtWidgets import QCheckBox
 
         checkbox = QCheckBox(label)
-        checkbox.setChecked(source_id not in _SERIAL_SOURCE_KEYS)
+        checkbox.setChecked(source_id not in _SERIAL_SOURCE_KEYS and source_id != "hr23_radar")
         return checkbox
 
     def _build_summary_device_group(self, key: str, title: str, bauds: list[int]):
