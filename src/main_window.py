@@ -780,8 +780,6 @@ class MainWindow(QMainWindow):
         if base_dir is None:
             base_dir = Path(self._summary_save_dir_edit.text().strip() or DEFAULT_RECORDINGS_DIR)
         self._summary_clock = RecordingClock(session_id=f"session_{timestamp}")
-        self._summary_recording_start_epoch_s = self._summary_clock.start_epoch_s
-        self._summary_recording_start_perf_s = self._summary_clock.start_perf_s
         self._summary_recording_stop_epoch_s = None
         self._summary_recording_stop_perf_s = None
         self._summary_dropped_pre_start_ros_messages = 0
@@ -789,6 +787,9 @@ class MainWindow(QMainWindow):
         self._summary_recording_gate_enabled = True
         self._set_summary_recording_state("STARTING", "STARTING")
         session_dir = self._create_summary_session_dir(Path(base_dir), timestamp)
+        self._summary_clock.session_id = session_dir.name
+        self._summary_recording_start_epoch_s = self._summary_clock.start_epoch_s
+        self._summary_recording_start_perf_s = self._summary_clock.start_perf_s
         self._summary_rosbag_session_id = ""
         self._summary_rosbag_config = {}
         self._summary_rosbag_start_sent = False
@@ -796,7 +797,7 @@ class MainWindow(QMainWindow):
         self._summary_latest_rosbag_status = {}
 
         if self._summary_source_enabled("rosbag_raw"):
-            self._start_summary_rosbag(timestamp)
+            self._start_summary_rosbag(session_dir.name)
 
         try:
             if self._summary_should_record_radar():
@@ -871,8 +872,9 @@ class MainWindow(QMainWindow):
             source_id: result.get("estimated_hz", 0.0)
             for source_id, result in check_results.items()
         }
+        session_id = self._summary_clock.session_id if self._summary_clock is not None else f"session_{started_at}"
         metadata = {
-            "session_id": f"session_{started_at}",
+            "session_id": session_id,
             "started_at": started_at,
             "started_at_iso": datetime.now().astimezone().isoformat(timespec="seconds"),
             "recording_start_epoch_s": self._summary_recording_start_epoch_s,
@@ -931,9 +933,8 @@ class MainWindow(QMainWindow):
         with path.open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
-    def _start_summary_rosbag(self, timestamp: str) -> None:
+    def _start_summary_rosbag(self, session_id: str) -> None:
         config = self._rosbag_panel.current_config()
-        session_id = f"session_{timestamp}"
         config["session_id"] = session_id
         config["action"] = "start_rosbag"
         self._summary_rosbag_session_id = session_id

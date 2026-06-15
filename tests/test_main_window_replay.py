@@ -469,6 +469,81 @@ class MainWindowReplayTests(unittest.TestCase):
         self.assertEqual(metadata["rosbag"]["session_id"], "session_20260612_153000")
         self.assertEqual(metadata["files"]["rosbag_manifest"], "raw/rosbag_manifest.json")
 
+    def test_summary_recording_sends_rosbag_start_for_each_session(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+        commands = []
+        window._ros_worker.request_rosbag_start = lambda config: commands.append(dict(config))
+        window._ros_worker.request_rosbag_stop = lambda session_id: commands.append(
+            {"action": "stop", "session_id": session_id}
+        )
+
+        with temp_dir() as tmp:
+            window._start_summary_recording(base_dir=tmp, timestamp="20260612_153000")
+            window._stop_summary_recording(save=True)
+            window._start_summary_recording(base_dir=tmp, timestamp="20260612_153100")
+            window._stop_summary_recording(save=True)
+
+        start_commands = [command for command in commands if command.get("action") == "start_rosbag"]
+        stop_commands = [command for command in commands if command.get("action") == "stop"]
+        self.assertEqual(
+            [command["session_id"] for command in start_commands],
+            ["session_20260612_153000", "session_20260612_153100"],
+        )
+        self.assertEqual(
+            [command["session_id"] for command in stop_commands],
+            ["session_20260612_153000", "session_20260612_153100"],
+        )
+
+    def test_summary_recording_uses_unique_rosbag_session_id_when_directory_gets_suffix(self) -> None:
+        window = MainWindow()
+        allow_summary_source_checks(window)
+        commands = []
+        window._ros_worker.request_rosbag_start = lambda config: commands.append(dict(config))
+        window._ros_worker.request_rosbag_stop = lambda session_id: commands.append(
+            {"action": "stop", "session_id": session_id}
+        )
+
+        with temp_dir() as tmp:
+            first_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260612_153000")
+            window._stop_summary_recording(save=True)
+            second_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260612_153000")
+            window._stop_summary_recording(save=True)
+
+        self.assertEqual(first_dir.name, "session_20260612_153000")
+        self.assertEqual(second_dir.name, "session_20260612_153000_001")
+        start_commands = [command for command in commands if command.get("action") == "start_rosbag"]
+        self.assertEqual(
+            [command["session_id"] for command in start_commands],
+            ["session_20260612_153000", "session_20260612_153000_001"],
+        )
+
+    def test_summary_record_button_sends_rosbag_start_for_repeated_recordings(self) -> None:
+        window = MainWindow()
+        window._apply_summary_check_results({"mock": {"status": "ok"}})
+        commands = []
+        stop_tasks = []
+        window._ros_worker.request_rosbag_start = lambda config: commands.append(dict(config))
+        window._ros_worker.request_rosbag_stop = lambda session_id: commands.append(
+            {"action": "stop", "session_id": session_id}
+        )
+        window._run_background_task = lambda function, _finished, _error: stop_tasks.append(function)
+
+        with temp_dir() as tmp:
+            window._summary_save_dir_edit.setText(str(tmp))
+            window._summary_record_btn.click()
+            window._summary_record_btn.click()
+            result = stop_tasks.pop(0)()
+            window._on_summary_stop_finished(result)
+            window._summary_record_btn.click()
+            window._summary_record_btn.click()
+            result = stop_tasks.pop(0)()
+            window._on_summary_stop_finished(result)
+
+        start_commands = [command for command in commands if command.get("action") == "start_rosbag"]
+        self.assertEqual(len(start_commands), 2)
+        self.assertNotEqual(start_commands[0]["session_id"], start_commands[1]["session_id"])
+
     def test_summary_page_defaults_trajectory_topic_to_odometry(self) -> None:
         window = MainWindow()
 
