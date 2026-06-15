@@ -931,6 +931,8 @@ class MainWindow(QMainWindow):
                     prepare_cmd_send_epoch_s=prepare_cmd_send_epoch_s,
                     prepare_cmd_send_perf_s=prepare_cmd_send_perf_s,
                     metadata={"experimentNote": note, "operator": ""},
+                    recording_start_epoch_s=self._summary_recording_start_epoch_s,
+                    recording_start_perf_s=self._summary_recording_start_perf_s,
                 )
                 self._summary_hr23_session_metadata["prepare_ack_recv_epoch_s"] = time()
                 self._merge_hr23_response(self._summary_hr23_session_metadata, prepare_response)

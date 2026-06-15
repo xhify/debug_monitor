@@ -646,10 +646,20 @@ class MainWindowReplayTests(unittest.TestCase):
                 timestamp="20260612_153000",
             )
             self.assertTrue((session_dir / "raw" / "hr23_radar").is_dir())
+            prepare_kwargs = fake.calls[0][1]
+            self.assertIn("recording_start_epoch_s", prepare_kwargs)
+            self.assertIn("recording_start_perf_s", prepare_kwargs)
+            self.assertEqual(
+                prepare_kwargs["recording_start_epoch_s"],
+                window._summary_recording_start_epoch_s,
+            )
+            self.assertEqual(
+                prepare_kwargs["recording_start_perf_s"],
+                window._summary_recording_start_perf_s,
+            )
             window._stop_summary_recording(save=True)
 
             self.assertEqual([call[0] for call in fake.calls], ["prepare", "start", "stop"])
-            prepare_kwargs = fake.calls[0][1]
             self.assertEqual(prepare_kwargs["session_id"], "session_20260612_153000")
             self.assertEqual(prepare_kwargs["output_dir"], session_dir / "raw" / "hr23_radar")
 
