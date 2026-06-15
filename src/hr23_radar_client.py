@@ -71,6 +71,8 @@ class Hr23RadarClient:
         prepare_cmd_send_epoch_s: float,
         prepare_cmd_send_perf_s: float,
         metadata: dict | None = None,
+        recording_start_epoch_s: float | None = None,
+        recording_start_perf_s: float | None = None,
     ) -> dict:
         request_metadata = {
             "experimentNote": "",
@@ -80,15 +82,25 @@ class Hr23RadarClient:
         if metadata:
             request_metadata.update(metadata)
         request_metadata["source"] = "debug_monitor"
+        time_base = {
+            "master": "debug_monitor",
+            "prepareCmdSendEpochS": float(prepare_cmd_send_epoch_s),
+            "prepareCmdSendPerfS": float(prepare_cmd_send_perf_s),
+        }
+        # Prefer the summary module's canonical session clock when callers provide it.
+        # Older call sites do not pass it yet, so fall back to the prepare-send instant;
+        # this still gives the recorder a debug_monitor-owned epoch instead of a local-only clock.
+        time_base["recordingStartEpochS"] = float(
+            prepare_cmd_send_epoch_s if recording_start_epoch_s is None else recording_start_epoch_s
+        )
+        time_base["recordingStartPerfS"] = float(
+            prepare_cmd_send_perf_s if recording_start_perf_s is None else recording_start_perf_s
+        )
         return self.request({
             "cmd": "prepare",
             "sessionId": session_id,
             "outputDir": str(Path(output_dir)),
-            "timeBase": {
-                "master": "debug_monitor",
-                "prepareCmdSendEpochS": float(prepare_cmd_send_epoch_s),
-                "prepareCmdSendPerfS": float(prepare_cmd_send_perf_s),
-            },
+            "timeBase": time_base,
             "metadata": request_metadata,
         })
 
