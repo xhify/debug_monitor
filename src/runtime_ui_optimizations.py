@@ -264,7 +264,7 @@ def _patch_main_window(cls: type) -> None:
         from PySide6.QtWidgets import QCheckBox
 
         checkbox = QCheckBox(label)
-        checkbox.setChecked(source_id not in _SERIAL_SOURCE_KEYS and source_id != "hr23_radar")
+        checkbox.setChecked(False)
         return checkbox
 
     def _build_summary_device_group(self, key: str, title: str, bauds: list[int]):

@@ -462,7 +462,7 @@ class MainWindow(QMainWindow):
 
         rosbag_row = QHBoxLayout()
         self._summary_rosbag_sync_cb = QCheckBox("同步车端 rosbag 录制")
-        self._summary_rosbag_sync_cb.setChecked(True)
+        self._summary_rosbag_sync_cb.setChecked(False)
         rosbag_row.addWidget(self._summary_rosbag_sync_cb)
         self._summary_rosbag_status_label = QLabel("ROSbridge 未连接")
         rosbag_row.addWidget(self._summary_rosbag_status_label, stretch=1)
@@ -507,7 +507,8 @@ class MainWindow(QMainWindow):
         group = QGroupBox("保存目录")
         layout = QGridLayout(group)
         self._summary_save_dir_edit = QLineEdit(DEFAULT_RECORDINGS_DIR)
-        self._summary_session_name_edit = QLineEdit(self._summary_default_session_name())
+        self._summary_session_name_edit = QLineEdit("")
+        self._summary_session_name_edit.setPlaceholderText("点击开始记录时自动生成 session_YYYYMMDD_HHMMSS")
         choose_btn = QPushButton("选择目录")
         choose_btn.clicked.connect(self._choose_summary_save_dir)
         self._summary_open_save_dir_btn = QPushButton("打开目录")
@@ -559,7 +560,7 @@ class MainWindow(QMainWindow):
         self._summary_source_checks = {}
         for index, (source_id, label) in enumerate(source_items):
             checkbox = QCheckBox(label)
-            checkbox.setChecked(True)
+            checkbox.setChecked(False)
             self._summary_source_checks[source_id] = checkbox
             layout.addWidget(checkbox, index // 2, index % 2)
         hr23_row = (len(source_items) + 1) // 2
@@ -757,7 +758,9 @@ class MainWindow(QMainWindow):
                 self._status_label.setText("请等待数据源检查完成后再次开始记录")
                 return
             try:
-                self._start_summary_recording()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self._summary_session_name_edit.setText(f"session_{timestamp}")
+                self._start_summary_recording(timestamp=timestamp)
             except Exception as exc:
                 self._summary_record_status_label.setText(f"启动失败: {exc}")
                 self._status_label.setText(f"同步记录启动失败: {exc}")

@@ -7,8 +7,10 @@ import sys
 import unittest
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
@@ -150,6 +152,14 @@ def allow_summary_source_checks(window: MainWindow) -> None:
             "notes": "test source ready",
         }
     }
+
+
+def enable_summary_sources(window: MainWindow, *source_ids: str) -> None:
+    for source_id in source_ids:
+        if source_id == "rosbag_raw":
+            window._summary_rosbag_sync_cb.setChecked(True)
+            continue
+        window._summary_source_checks[source_id].setChecked(True)
 
 
 class MainWindowReplayTests(unittest.TestCase):
@@ -377,6 +387,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_writes_encoder_and_imu_files_to_one_directory(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "serial_encoder", "imu_A", "imu_B")
         with temp_dir() as tmp:
             window._summary_note_edit.setPlainText("室内地面，低速直线，PWM 3000")
             session_dir = window._start_summary_recording(
@@ -431,29 +442,24 @@ class MainWindowReplayTests(unittest.TestCase):
 
         self.assertEqual(window._summary_save_dir_edit.text(), r"D:\debug_monitor\recordings")
 
-    def test_summary_page_defaults_all_recordable_sources_checked(self) -> None:
+    def test_summary_page_defaults_all_recordable_sources_unchecked(self) -> None:
         window = MainWindow()
 
         self.assertTrue(window._summary_source_checks)
-        self.assertFalse(window._summary_source_checks["hr23_radar"].isChecked())
-        self.assertTrue(all(
-            check.isChecked()
-            for source_id, check in window._summary_source_checks.items()
-            if source_id != "hr23_radar"
-        ))
+        self.assertTrue(all(not check.isChecked() for check in window._summary_source_checks.values()))
 
     def test_summary_page_exposes_rosbag_sync_checkbox(self) -> None:
         window = MainWindow()
 
         self.assertEqual(window._summary_rosbag_sync_cb.text(), "同步车端 rosbag 录制")
-        self.assertTrue(window._summary_rosbag_sync_cb.isChecked())
-        self.assertTrue(window._summary_source_enabled("rosbag_raw"))
-        self.assertIn("rosbag_raw", window._selected_summary_sources())
-
-        window._summary_rosbag_sync_cb.setChecked(False)
-
+        self.assertFalse(window._summary_rosbag_sync_cb.isChecked())
         self.assertFalse(window._summary_source_enabled("rosbag_raw"))
         self.assertNotIn("rosbag_raw", window._selected_summary_sources())
+
+        window._summary_rosbag_sync_cb.setChecked(True)
+
+        self.assertTrue(window._summary_source_enabled("rosbag_raw"))
+        self.assertIn("rosbag_raw", window._selected_summary_sources())
 
     def test_launch_manager_status_updates_rosbag_panel(self) -> None:
         window = MainWindow()
@@ -502,6 +508,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_sends_rosbag_start_and_stop_and_writes_metadata(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "rosbag_raw")
         commands = []
         window._ros_worker.request_rosbag_start = commands.append
         window._ros_worker.request_rosbag_stop = lambda session_id: commands.append({"action": "stop", "session_id": session_id})
@@ -535,6 +542,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_sends_rosbag_start_for_each_session(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "rosbag_raw")
         commands = []
         window._ros_worker.request_rosbag_start = lambda config: commands.append(dict(config))
         window._ros_worker.request_rosbag_stop = lambda session_id: commands.append(
@@ -561,6 +569,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_uses_unique_rosbag_session_id_when_directory_gets_suffix(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "rosbag_raw")
         commands = []
         window._ros_worker.request_rosbag_start = lambda config: commands.append(dict(config))
         window._ros_worker.request_rosbag_stop = lambda session_id: commands.append(
@@ -584,6 +593,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_record_button_sends_rosbag_start_for_repeated_recordings(self) -> None:
         window = MainWindow()
         window._apply_summary_check_results({"mock": {"status": "ok"}})
+        enable_summary_sources(window, "rosbag_raw")
         commands = []
         stop_tasks = []
         window._ros_worker.request_rosbag_start = lambda config: commands.append(dict(config))
@@ -606,6 +616,21 @@ class MainWindowReplayTests(unittest.TestCase):
         start_commands = [command for command in commands if command.get("action") == "start_rosbag"]
         self.assertEqual(len(start_commands), 2)
         self.assertNotEqual(start_commands[0]["session_id"], start_commands[1]["session_id"])
+
+    def test_summary_record_button_names_folder_from_click_time(self) -> None:
+        window = MainWindow()
+        window._apply_summary_check_results({"mock": {"status": "ok"}})
+        window._summary_session_name_edit.setText("session_stale_value")
+
+        with temp_dir() as tmp:
+            window._summary_save_dir_edit.setText(str(tmp))
+            with patch("main_window.datetime") as fake_datetime:
+                fake_datetime.now.return_value = datetime(2026, 6, 17, 10, 20, 30)
+                window._summary_record_btn.click()
+
+            self.assertEqual(window._summary_session_dir.name, "session_20260617_102030")
+            self.assertEqual(window._summary_session_name_edit.text(), "session_20260617_102030")
+            window._stop_summary_recording(save=False)
 
     def test_summary_page_defaults_trajectory_topic_to_odometry(self) -> None:
         window = MainWindow()
@@ -746,6 +771,22 @@ class MainWindowReplayTests(unittest.TestCase):
 
     def test_check_summary_sources_reports_offline_when_ros_and_serial_are_unavailable(self) -> None:
         window = MainWindow()
+        enable_summary_sources(
+            window,
+            "serial_encoder",
+            "imu_A",
+            "imu_B",
+            "fastlio_odometry",
+            "ros_odom",
+            "ros_imu",
+            "ros_active_imu",
+            "ros_power_voltage",
+            "akm_state",
+            "control_debug",
+            "chassis_diagnostics",
+            "radar_bin",
+            "rosbag_raw",
+        )
         window._sample_ros_topic = lambda **kwargs: SimpleNamespace(
             status="offline",
             estimated_hz=0.0,
@@ -812,6 +853,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_can_use_ros_odom_and_received_ros_imu_sources(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "ros_odom", "ros_imu", "ros_active_imu")
         window._summary_rows["encoder"]["source_combo"].setCurrentIndex(
             window._summary_rows["encoder"]["source_combo"].findData("ros_odom")
         )
@@ -864,6 +906,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_writes_fastlio_and_akm_topic_files_from_ros_messages(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "fastlio_odometry", "akm_state")
 
         with temp_dir() as tmp:
             session_dir = window._start_summary_recording(
@@ -912,6 +955,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_ros_message_gate_drops_messages_outside_recording_window(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "ros_odom")
 
         with temp_dir() as tmp:
             session_dir = window._start_summary_recording(base_dir=tmp, timestamp="20260609_101500")
@@ -975,6 +1019,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_async_stop_detaches_ui_state_before_background_finalize(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "serial_encoder", "imu_A")
 
         with temp_dir() as tmp:
             window._summary_note_edit.setPlainText("async stop")
@@ -1023,6 +1068,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_starts_and_stops_radar_when_sync_is_checked(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "radar_bin")
         radar = FakeRadarClient()
         window._radar_client = radar
         window._test_summary_radar_connection()
@@ -1038,6 +1084,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_parses_radar_outputs_into_raw_radar_directory(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "radar_bin")
         radar = FakeRadarClient()
         window._radar_client = radar
         window._test_summary_radar_connection()
@@ -1085,6 +1132,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_summary_recording_aborts_when_checked_radar_start_fails(self) -> None:
         window = MainWindow()
         allow_summary_source_checks(window)
+        enable_summary_sources(window, "radar_bin", "rosbag_raw")
         radar = FakeRadarClient(fail_start=True)
         window._radar_client = radar
         window._summary_radar_sync_cb.setEnabled(True)
