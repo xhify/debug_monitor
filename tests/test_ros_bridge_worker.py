@@ -77,7 +77,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         FakeTopic.created.clear()
         FakeService.calls.clear()
 
-    def test_connect_subscribes_to_standard_robot_topics(self) -> None:
+    def test_connect_subscribes_to_core_topic_and_publish_topics_by_default(self) -> None:
         session = RosBridgeSession(
             host="192.168.0.14",
             port=9090,
@@ -94,20 +94,61 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertEqual(
             [(topic.name, topic.message_type) for topic in FakeTopic.created],
             [
-                ("/odom", "nav_msgs/Odometry"),
-                ("/Odometry", "nav_msgs/Odometry"),
-                ("/imu", "sensor_msgs/Imu"),
-                ("/active_imu", "sensor_msgs/Imu"),
-                ("/PowerVoltage", "std_msgs/Float32"),
-                ("/wheeltec/akm_state", "turn_on_wheeltec_robot/AkmState"),
-                ("/wheeltec/control_debug", "turn_on_wheeltec_robot/ControlDebug"),
-                ("/wheeltec/chassis_diagnostics", "turn_on_wheeltec_robot/ChassisDiagnostics"),
                 ("/launch_manager/status", "std_msgs/String"),
                 ("/cmd_vel", "geometry_msgs/Twist"),
                 ("/line_follow_control", "simple_follower/LineFollowControl"),
                 ("/launch_manager/command", "std_msgs/String"),
             ],
         )
+        subscribed_names = [topic.name for topic in FakeTopic.created if topic.callback is not None]
+        self.assertEqual(subscribed_names, ["/launch_manager/status"])
+
+    def test_connect_subscribes_only_selected_data_topics(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            enabled_data_topics=["/odom", "/imu"],
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+
+        session.connect()
+
+        subscribed_names = [topic.name for topic in FakeTopic.created if topic.callback is not None]
+        self.assertEqual(subscribed_names, ["/launch_manager/status", "/odom", "/imu"])
+        self.assertNotIn("/active_imu", subscribed_names)
+
+    def test_update_data_subscriptions_subscribes_and_unsubscribes_without_touching_core(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            enabled_data_topics=["/odom", "/imu"],
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+        odom_topic = session.topic("/odom")
+        imu_topic = session.topic("/imu")
+        core_topic = session.topic("/launch_manager/status")
+
+        session.update_data_subscriptions(["/imu", "/active_imu"])
+
+        self.assertTrue(odom_topic.unsubscribed)
+        self.assertFalse(imu_topic.unsubscribed)
+        self.assertFalse(core_topic.unsubscribed)
+        self.assertIn("/active_imu", session._topics)
+        self.assertIsNotNone(session.topic("/active_imu").callback)
+
+    def test_update_data_subscriptions_rejects_unknown_topic(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+
+        with self.assertRaises(ValueError):
+            session.update_data_subscriptions(["/not_a_data_topic"])
 
     def test_measure_network_latency_uses_rosapi_get_time_round_trip(self) -> None:
         times = iter([10.0, 10.012])
@@ -134,6 +175,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         session = RosBridgeSession(
             host="192.168.0.14",
             port=9090,
+            enabled_data_topics=["/odom", "/imu", "/active_imu", "/PowerVoltage"],
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
         )
@@ -190,6 +232,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         session = RosBridgeSession(
             host="192.168.0.14",
             port=9090,
+            enabled_data_topics=["/odom"],
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
         )
@@ -215,6 +258,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         session = RosBridgeSession(
             host="192.168.0.14",
             port=9090,
+            enabled_data_topics=["/imu", "/active_imu"],
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
         )
@@ -261,6 +305,7 @@ class RosBridgeSessionTests(unittest.TestCase):
         session = RosBridgeSession(
             host="192.168.0.14",
             port=9090,
+            enabled_data_topics=["/odom", "/imu"],
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
         )
@@ -371,7 +416,10 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertFalse(session.connected)
         self.assertTrue(session.ros.closed)
         self.assertFalse(session.ros.terminated)
-        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:9]))
+        subscribed_topics = [topic for topic in FakeTopic.created if topic.callback is not None]
+        publish_topics = [topic for topic in FakeTopic.created if topic.callback is None]
+        self.assertTrue(all(topic.unsubscribed for topic in subscribed_topics))
+        self.assertFalse(any(topic.unsubscribed for topic in publish_topics))
 
     def test_disconnect_tolerates_roslibpy_missing_thread_terminate_bug(self) -> None:
         session = RosBridgeSession(
@@ -387,7 +435,10 @@ class RosBridgeSessionTests(unittest.TestCase):
         self.assertFalse(session.connected)
         self.assertTrue(session.ros.closed)
         self.assertFalse(session.ros.terminated)
-        self.assertTrue(all(topic.unsubscribed for topic in FakeTopic.created[:9]))
+        subscribed_topics = [topic for topic in FakeTopic.created if topic.callback is not None]
+        publish_topics = [topic for topic in FakeTopic.created if topic.callback is None]
+        self.assertTrue(all(topic.unsubscribed for topic in subscribed_topics))
+        self.assertFalse(any(topic.unsubscribed for topic in publish_topics))
 
     def test_session_can_connect_again_after_disconnect_without_restarting_reactor(self) -> None:
         session = RosBridgeSession(

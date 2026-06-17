@@ -477,7 +477,12 @@ def _unify_rosbridge_controls(window: Any) -> None:
                 panel._connect_btn.clicked.disconnect()
             except Exception:
                 pass
-            panel._connect_btn.clicked.connect(lambda _checked=False, w=window: _open_unified_rosbridge(w))
+            if panel is getattr(window, "_localization_panel", None):
+                panel._connect_btn.clicked.connect(
+                    lambda _checked=False, w=window: _open_unified_rosbridge_for_localization(w)
+                )
+            else:
+                panel._connect_btn.clicked.connect(lambda _checked=False, w=window: _open_unified_rosbridge(w))
         if hasattr(panel, "_disconnect_btn"):
             try:
                 panel._disconnect_btn.clicked.disconnect()
@@ -675,7 +680,26 @@ def _sync_unified_rosbridge_endpoint(window: Any) -> None:
 def _open_unified_rosbridge(window: Any) -> None:
     host = window._ros_panel._host_edit.text().strip() or DEFAULT_ROSBRIDGE_HOST
     port = window._ros_panel._port_spin.value()
-    window._ros_worker.open_bridge(host, port)
+    selected_topics = (
+        window._ros_panel.selected_data_topics()
+        if hasattr(window._ros_panel, "selected_data_topics")
+        else []
+    )
+    window._ros_worker.open_bridge(host, port, selected_topics)
+    _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
+
+
+def _open_unified_rosbridge_for_localization(window: Any) -> None:
+    host = window._ros_panel._host_edit.text().strip() or DEFAULT_ROSBRIDGE_HOST
+    port = window._ros_panel._port_spin.value()
+    topics = []
+    if hasattr(window._ros_panel, "selected_data_topics"):
+        topics.extend(window._ros_panel.selected_data_topics())
+    topic_edit = getattr(getattr(window, "_localization_panel", None), "_topic_edit", None)
+    odometry_topic = topic_edit.text().strip() if topic_edit is not None else ""
+    if odometry_topic and odometry_topic not in topics:
+        topics.append(odometry_topic)
+    window._ros_worker.open_bridge(host, port, topics)
     _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
 
 

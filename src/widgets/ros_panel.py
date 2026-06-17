@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -23,7 +24,12 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 
-from app_config import DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
+from app_config import (
+    DEFAULT_ROSBRIDGE_HOST,
+    DEFAULT_ROSBRIDGE_PORT,
+    ROSBRIDGE_DATA_TOPIC_OPTIONS,
+    ROSBRIDGE_DATA_TOPIC_PRESETS,
+)
 from ros_bridge_worker import RosSnapshot
 from ros_data import RosCsvRecordingSession, RosTimeSeriesBuffer
 
@@ -38,8 +44,9 @@ PID_LAUNCH_STOP_COMMAND = "stop pid_control"
 class RosPanel(QWidget):
     """ROS monitor and command panel backed by rosbridge websocket."""
 
-    connect_requested = Signal(str, int)
+    connect_requested = Signal(str, int, object)
     disconnect_requested = Signal()
+    data_subscriptions_changed = Signal(object)
     cmd_vel_requested = Signal(float, float)
     pid_control_requested = Signal(float, bool, bool)
     launch_manager_command_requested = Signal(str)
@@ -58,6 +65,8 @@ class RosPanel(QWidget):
         self._active_launch_variant: str | None = None
         self._recording_session: RosCsvRecordingSession | None = None
         self._pending_snapshot: RosSnapshot | None = None
+        self._topic_checkboxes: dict[str, QCheckBox] = {}
+        self._preset_buttons: dict[str, QPushButton] = {}
         self._setup_ui()
         self._setup_refresh_timer()
         self.set_connected(False)
@@ -92,6 +101,7 @@ class RosPanel(QWidget):
         connection_layout.addWidget(self._status_label)
         connection_layout.addStretch()
         layout.addWidget(connection_group)
+        layout.addWidget(self._build_data_topic_group())
 
         content_row = QHBoxLayout()
         content_row.setSpacing(8)
@@ -211,6 +221,39 @@ class RosPanel(QWidget):
         layout.addWidget(record_group)
         layout.addStretch()
 
+    def _build_data_topic_group(self) -> QGroupBox:
+        group = QGroupBox("ROS 数据 topic 订阅")
+        layout = QVBoxLayout(group)
+
+        grid = QGridLayout()
+        for index, option in enumerate(ROSBRIDGE_DATA_TOPIC_OPTIONS):
+            topic = str(option["topic"])
+            checkbox = QCheckBox(str(option["label"]))
+            checkbox.setToolTip(topic)
+            checkbox.setChecked(False)
+            self._topic_checkboxes[topic] = checkbox
+            grid.addWidget(checkbox, index // 2, index % 2)
+        layout.addLayout(grid)
+
+        preset_row = QHBoxLayout()
+        for preset_key, text in (
+            ("none", "全不选"),
+            ("basic_low_bandwidth", "基础低带宽"),
+            ("localization", "定位"),
+            ("diagnostics", "诊断"),
+            ("full", "全选"),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(lambda _checked=False, key=preset_key: self._apply_topic_preset(key))
+            self._preset_buttons[preset_key] = button
+            preset_row.addWidget(button)
+        preset_row.addStretch()
+        self._apply_subscriptions_btn = QPushButton("应用订阅")
+        self._apply_subscriptions_btn.clicked.connect(self._on_apply_subscriptions)
+        preset_row.addWidget(self._apply_subscriptions_btn)
+        layout.addLayout(preset_row)
+        return group
+
     def _build_speed_monitor_group(self) -> QGroupBox:
         group = QGroupBox("速度监视")
         layout = QVBoxLayout(group)
@@ -323,7 +366,18 @@ class RosPanel(QWidget):
         if not host:
             self._status_label.setText("请输入主机")
             return
-        self.connect_requested.emit(host, self._port_spin.value())
+        self.connect_requested.emit(host, self._port_spin.value(), self.selected_data_topics())
+
+    def selected_data_topics(self) -> list[str]:
+        return [topic for topic, checkbox in self._topic_checkboxes.items() if checkbox.isChecked()]
+
+    def _apply_topic_preset(self, preset_key: str) -> None:
+        selected = set(ROSBRIDGE_DATA_TOPIC_PRESETS.get(preset_key, []))
+        for topic, checkbox in self._topic_checkboxes.items():
+            checkbox.setChecked(topic in selected)
+
+    def _on_apply_subscriptions(self) -> None:
+        self.data_subscriptions_changed.emit(self.selected_data_topics())
 
     def _on_send_cmd_vel(self) -> None:
         linear_x = self._linear_x_spin.value()

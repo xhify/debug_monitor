@@ -299,8 +299,9 @@ class MainWindow(QMainWindow):
         self._ros_imu_panel = RosImuPanel()
         self._rosbag_panel = RosbagPanel()
         self._localization_panel = LocalizationPanel()
-        self._ros_panel.connect_requested.connect(self._ros_worker.open_bridge)
+        self._ros_panel.connect_requested.connect(self._on_ros_connect)
         self._ros_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
+        self._ros_panel.data_subscriptions_changed.connect(self._ros_worker.update_data_subscriptions)
         self._ros_panel.cmd_vel_requested.connect(self._ros_worker.publish_cmd_vel)
         self._ros_panel.pid_control_requested.connect(self._ros_worker.publish_line_follow_control)
         self._ros_panel.launch_manager_command_requested.connect(self._publish_launch_manager_command)
@@ -706,7 +707,11 @@ class MainWindow(QMainWindow):
 
     def _connect_summary_device(self, key: str) -> None:
         if self._summary_source(key) != "serial":
-            self._ros_worker.open_bridge(self._ros_panel._host_edit.text().strip(), self._ros_panel._port_spin.value())
+            self._ros_worker.open_bridge(
+                self._ros_panel._host_edit.text().strip(),
+                self._ros_panel._port_spin.value(),
+                self._ros_panel.selected_data_topics(),
+            )
             return
         port = self._summary_port(key)
         if not port:
@@ -1498,6 +1503,9 @@ class MainWindow(QMainWindow):
     def _publish_launch_manager_command(self, command: str) -> None:
         self._ros_worker.publish_launch_manager_command(command)
         self._status_label.setText(f"launch_manager 命令已发送: {command}")
+
+    def _on_ros_connect(self, host: str, port: int, enabled_data_topics: list[str]) -> None:
+        self._ros_worker.open_bridge(host, port, enabled_data_topics)
 
     def _on_ros_connection_changed(self, connected: bool) -> None:
         self._ros_connected = connected

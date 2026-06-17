@@ -25,16 +25,49 @@ class RosPanelTests(unittest.TestCase):
             widget.deleteLater()
         self.app.processEvents()
 
-    def test_connect_button_emits_host_and_port(self) -> None:
+    def test_connect_button_emits_host_port_and_selected_data_topics(self) -> None:
         panel = RosPanel()
-        requests: list[tuple[str, int]] = []
-        panel.connect_requested.connect(lambda host, port: requests.append((host, port)))
+        requests: list[tuple[str, int, list[str]]] = []
+        panel.connect_requested.connect(lambda host, port, topics: requests.append((host, port, list(topics))))
         panel._host_edit.setText("192.168.0.14")
         panel._port_spin.setValue(9090)
+        panel._topic_checkboxes["/odom"].setChecked(True)
+        panel._topic_checkboxes["/imu"].setChecked(True)
 
         panel._connect_btn.click()
 
-        self.assertEqual(requests, [("192.168.0.14", 9090)])
+        self.assertEqual(requests, [("192.168.0.14", 9090, ["/odom", "/imu"])])
+
+    def test_data_topic_checkboxes_default_to_unchecked(self) -> None:
+        panel = RosPanel()
+
+        self.assertEqual(panel.selected_data_topics(), [])
+        self.assertTrue(panel._topic_checkboxes)
+        self.assertTrue(all(not checkbox.isChecked() for checkbox in panel._topic_checkboxes.values()))
+
+    def test_data_topic_presets_select_expected_topics(self) -> None:
+        panel = RosPanel()
+
+        panel._preset_buttons["none"].click()
+        self.assertEqual(panel.selected_data_topics(), [])
+
+        panel._preset_buttons["basic_low_bandwidth"].click()
+        self.assertEqual(panel.selected_data_topics(), ["/odom", "/imu"])
+
+        panel._preset_buttons["full"].click()
+        self.assertEqual(set(panel.selected_data_topics()), set(panel._topic_checkboxes))
+        self.assertNotIn("/launch_manager/status", panel.selected_data_topics())
+
+    def test_apply_data_subscriptions_emits_selected_topics(self) -> None:
+        panel = RosPanel()
+        requests: list[list[str]] = []
+        panel.data_subscriptions_changed.connect(lambda topics: requests.append(list(topics)))
+        panel._topic_checkboxes["/PowerVoltage"].setChecked(True)
+        panel._topic_checkboxes["/wheeltec/control_debug"].setChecked(True)
+
+        panel._apply_subscriptions_btn.click()
+
+        self.assertEqual(requests, [["/PowerVoltage", "/wheeltec/control_debug"]])
 
     def test_cmd_vel_buttons_emit_velocity_commands(self) -> None:
         panel = RosPanel()

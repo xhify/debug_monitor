@@ -7,11 +7,16 @@ import json
 from math import asin, atan2, copysign, degrees, pi, sqrt
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from PySide6.QtCore import QThread, Signal
 
-from app_config import DEFAULT_FASTLIO_ODOM_TOPIC, DEFAULT_ROSBRIDGE_HOST, DEFAULT_ROSBRIDGE_PORT
+from app_config import (
+    DEFAULT_FASTLIO_ODOM_TOPIC,
+    DEFAULT_ROSBRIDGE_HOST,
+    DEFAULT_ROSBRIDGE_PORT,
+    ROSBRIDGE_DATA_TOPIC_OPTIONS,
+)
 
 
 @dataclass(slots=True)
@@ -102,26 +107,24 @@ class RosSnapshot:
 class RosBridgeSession:
     """Small testable wrapper around roslibpy topic subscription and publish."""
 
-    SUBSCRIPTIONS = (
-        ("/odom", "nav_msgs/Odometry"),
-        (DEFAULT_FASTLIO_ODOM_TOPIC, "nav_msgs/Odometry"),
-        ("/imu", "sensor_msgs/Imu"),
-        ("/active_imu", "sensor_msgs/Imu"),
-        ("/PowerVoltage", "std_msgs/Float32"),
-        ("/wheeltec/akm_state", "turn_on_wheeltec_robot/AkmState"),
-        ("/wheeltec/control_debug", "turn_on_wheeltec_robot/ControlDebug"),
-        ("/wheeltec/chassis_diagnostics", "turn_on_wheeltec_robot/ChassisDiagnostics"),
+    DATA_SUBSCRIPTIONS = tuple(
+        (str(option["topic"]), str(option["type"])) for option in ROSBRIDGE_DATA_TOPIC_OPTIONS
+    )
+    CORE_SUBSCRIPTIONS = (
         ("/launch_manager/status", "std_msgs/String"),
     )
+    SUBSCRIPTIONS = DATA_SUBSCRIPTIONS + CORE_SUBSCRIPTIONS
     CMD_VEL_TOPIC = ("/cmd_vel", "geometry_msgs/Twist")
     LINE_FOLLOW_CONTROL_TOPIC = ("/line_follow_control", "simple_follower/LineFollowControl")
     LAUNCH_MANAGER_COMMAND_TOPIC = ("/launch_manager/command", "std_msgs/String")
+    PUBLISH_TOPICS = (CMD_VEL_TOPIC, LINE_FOLLOW_CONTROL_TOPIC, LAUNCH_MANAGER_COMMAND_TOPIC)
 
     def __init__(
         self,
         host: str,
         port: int,
         *,
+        enabled_data_topics: Iterable[str] | None = None,
         ros_factory: Callable[[str, int], Any] | None = None,
         topic_factory: Callable[[Any, str, str], Any] | None = None,
         message_factory: Callable[[dict], Any] | None = None,
@@ -146,6 +149,10 @@ class RosBridgeSession:
         self._lock = threading.Lock()
         self._snapshot = RosSnapshot()
         self._topics: dict[str, Any] = {}
+        self._enabled_data_topics = self._validated_data_topics(enabled_data_topics or [])
+        self._subscribed_data_topics: dict[str, Any] = {}
+        self._core_topics: dict[str, Any] = {}
+        self._publish_topics: dict[str, Any] = {}
         self._time_service: Any | None = None
         self.ros: Any | None = None
         self.connected = False
@@ -157,29 +164,51 @@ class RosBridgeSession:
         self.ros = self._ros_factory(self.host, self.port)
         self.ros.run()
 
-        for name, message_type in self.SUBSCRIPTIONS:
-            topic = self._topic_factory(self.ros, name, message_type)
-            topic.subscribe(self._callback_for(name))
-            self._topics[name] = topic
+        for name, message_type in self.CORE_SUBSCRIPTIONS:
+            self._subscribe_topic(name, message_type, self._core_topics)
 
-        cmd_name, cmd_type = self.CMD_VEL_TOPIC
-        self._topics[cmd_name] = self._topic_factory(self.ros, cmd_name, cmd_type)
-        control_name, control_type = self.LINE_FOLLOW_CONTROL_TOPIC
-        self._topics[control_name] = self._topic_factory(self.ros, control_name, control_type)
-        launch_name, launch_type = self.LAUNCH_MANAGER_COMMAND_TOPIC
-        self._topics[launch_name] = self._topic_factory(self.ros, launch_name, launch_type)
+        for name, message_type in self.DATA_SUBSCRIPTIONS:
+            if name in self._enabled_data_topics:
+                self._subscribe_topic(name, message_type, self._subscribed_data_topics)
+
+        for name, message_type in self.PUBLISH_TOPICS:
+            topic = self._topic_factory(self.ros, name, message_type)
+            self._publish_topics[name] = topic
+            self._topics[name] = topic
         if self._service_factory is not None:
             self._time_service = self._service_factory(self.ros, "/rosapi/get_time", "rosapi/GetTime")
         self.connected = True
 
     def disconnect(self) -> None:
-        for name, _message_type in self.SUBSCRIPTIONS:
-            topic = self._topics.get(name)
-            if topic is not None:
-                topic.unsubscribe()
+        for topic in list(self._subscribed_data_topics.values()):
+            topic.unsubscribe()
+        for topic in list(self._core_topics.values()):
+            topic.unsubscribe()
         if self.ros is not None:
             self.ros.close()
+        self._topics.clear()
+        self._subscribed_data_topics.clear()
+        self._core_topics.clear()
+        self._publish_topics.clear()
+        self._time_service = None
         self.connected = False
+
+    def update_data_subscriptions(self, enabled_data_topics: Iterable[str]) -> None:
+        enabled = self._validated_data_topics(enabled_data_topics)
+        self._enabled_data_topics = enabled
+        if not self.connected:
+            return
+
+        to_remove = set(self._subscribed_data_topics) - enabled
+        to_add = enabled - set(self._subscribed_data_topics)
+        for name in to_remove:
+            topic = self._subscribed_data_topics.pop(name)
+            topic.unsubscribe()
+            self._topics.pop(name, None)
+
+        data_types = dict(self.DATA_SUBSCRIPTIONS)
+        for name in self._data_topic_order(to_add):
+            self._subscribe_topic(name, data_types[name], self._subscribed_data_topics)
 
     def publish_cmd_vel(self, linear_x: float, angular_z: float) -> None:
         if not self.connected:
@@ -265,6 +294,26 @@ class RosBridgeSession:
 
     def topic(self, name: str) -> Any:
         return self._topics[name]
+
+    def _subscribe_topic(self, name: str, message_type: str, destination: dict[str, Any]) -> None:
+        topic = self._topic_factory(self.ros, name, message_type)
+        topic.subscribe(self._callback_for(name))
+        destination[name] = topic
+        self._topics[name] = topic
+
+    @classmethod
+    def _validated_data_topics(cls, enabled_data_topics: Iterable[str]) -> set[str]:
+        allowed = {name for name, _message_type in cls.DATA_SUBSCRIPTIONS}
+        selected = {str(topic) for topic in enabled_data_topics}
+        unknown = selected - allowed
+        if unknown:
+            raise ValueError(f"unsupported ROS data topic: {', '.join(sorted(unknown))}")
+        return selected
+
+    @classmethod
+    def _data_topic_order(cls, topics: Iterable[str]) -> list[str]:
+        selected = set(topics)
+        return [name for name, _message_type in cls.DATA_SUBSCRIPTIONS if name in selected]
 
     def _load_default_factories(self) -> None:
         if self._ros_factory and self._topic_factory:
@@ -460,6 +509,7 @@ class RosBridgeWorker(QThread):
         self._running = False
         self._host = DEFAULT_ROSBRIDGE_HOST
         self._port = DEFAULT_ROSBRIDGE_PORT
+        self._enabled_data_topics: list[str] = []
         self._error_count = 0
         self._network_latency_ms: float | None = None
 
@@ -477,13 +527,28 @@ class RosBridgeWorker(QThread):
     def network_latency_ms(self) -> float | None:
         return self._network_latency_ms
 
-    def open_bridge(self, host: str, port: int = DEFAULT_ROSBRIDGE_PORT) -> None:
+    def open_bridge(
+        self,
+        host: str,
+        port: int = DEFAULT_ROSBRIDGE_PORT,
+        enabled_data_topics: Iterable[str] | None = None,
+    ) -> None:
+        self._enabled_data_topics = list(enabled_data_topics or [])
         if self.isRunning():
             return
         self._host = host
         self._port = int(port)
         self._running = True
         self.start()
+
+    def update_data_subscriptions(self, enabled_data_topics: Iterable[str]) -> None:
+        self._enabled_data_topics = list(enabled_data_topics)
+        try:
+            if self._session is not None and self._session.connected:
+                self._session.update_data_subscriptions(self._enabled_data_topics)
+        except Exception as exc:
+            self._error_count += 1
+            self.error_occurred.emit(f"ROS 订阅更新失败: {exc}")
 
     def close_bridge(self) -> None:
         self._running = False
@@ -557,6 +622,7 @@ class RosBridgeWorker(QThread):
             self._session = RosBridgeSession(
                 host=self._host,
                 port=self._port,
+                enabled_data_topics=self._enabled_data_topics,
                 on_snapshot=self.snapshot_received.emit,
                 on_message=self.message_received.emit,
                 on_launch_manager_status=self.launch_manager_status_received.emit,

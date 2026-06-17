@@ -65,7 +65,7 @@ class RuntimeUiOptimizationTests(unittest.TestCase):
 
         window._on_ros_connection_changed(True)
 
-        expected = "ROSbridge: 已连接 192.168.0.100:9090 / 网络延迟: --- / 错误 3"
+        expected = "ROSbridge: 已连接 192.168.0.14:9090 / 网络延迟: --- / 错误 3"
         self.assertEqual(window._summary_rosbridge_status_label.text(), expected)
         self.assertEqual(window._ros_panel._status_label.text(), expected)
         self.assertEqual(window._ros_imu_panel._status_label.text(), expected)
@@ -246,6 +246,17 @@ class RuntimeUiOptimizationTests(unittest.TestCase):
         self.assertFalse(window._localization_panel._connect_btn.isEnabled())
         self.assertTrue(window._localization_panel._disconnect_btn.isEnabled())
         self.assertEqual(commands, ["start fastlio fast_lio mapping_c16.launch"])
+
+    def test_localization_connect_subscribes_its_odometry_topic_on_shared_rosbridge(self) -> None:
+        window = MainWindow()
+        requests: list[tuple[str, int, list[str]]] = []
+        window._ros_worker.open_bridge = lambda host, port, topics=None: requests.append((host, port, list(topics or [])))
+        window._ros_panel._topic_checkboxes["/imu"].setChecked(False)
+        window._localization_panel._topic_edit.setText("/Odometry")
+
+        window._localization_panel._connect_btn.click()
+
+        self.assertEqual(requests, [("192.168.0.14", 9090, ["/Odometry"])])
 
 
 if __name__ == "__main__":

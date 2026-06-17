@@ -309,6 +309,19 @@ class MainWindowReplayTests(unittest.TestCase):
 
         self.assertEqual(commands, [(0.2, True, False)])
 
+    def test_ros_panel_connect_passes_selected_data_topics_to_worker(self) -> None:
+        window = MainWindow()
+        requests: list[tuple[str, int, list[str]]] = []
+        window._ros_worker.open_bridge = lambda host, port, topics=None: requests.append((host, port, list(topics or [])))
+        window._ros_panel._host_edit.setText("192.168.0.14")
+        window._ros_panel._port_spin.setValue(9090)
+        window._ros_panel._topic_checkboxes["/odom"].setChecked(True)
+        window._ros_panel._topic_checkboxes["/imu"].setChecked(True)
+
+        window._ros_panel._connect_btn.click()
+
+        self.assertEqual(requests, [("192.168.0.14", 9090, ["/odom", "/imu"])])
+
     def test_ros_panel_pid_launch_buttons_publish_launch_manager_commands(self) -> None:
         window = MainWindow()
         commands: list[str] = []

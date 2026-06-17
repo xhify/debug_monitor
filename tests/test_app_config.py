@@ -7,6 +7,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 class AppConfigTests(unittest.TestCase):
+    def test_default_rosbridge_host_matches_current_robot_ip(self) -> None:
+        import app_config
+
+        self.assertEqual(app_config.DEFAULT_ROSBRIDGE_HOST, "192.168.0.14")
+
+    def test_rosbridge_data_topic_options_keep_laser_map_out_of_continuous_ros_panel_topics(self) -> None:
+        import app_config
+
+        topics = {option["topic"] for option in app_config.ROSBRIDGE_DATA_TOPIC_OPTIONS}
+
+        self.assertNotIn("/Laser_map", topics)
+        self.assertNotIn("/launch_manager/status", topics)
+
     def test_env_host_changes_internal_worker_defaults(self) -> None:
         old_value = os.environ.get("DEBUG_MONITOR_ROSBRIDGE_HOST")
         os.environ["DEBUG_MONITOR_ROSBRIDGE_HOST"] = "robot-env.local"
