@@ -42,8 +42,8 @@ class RosbagSyncWorker(QObject):
             return
 
         self.progress.emit("rsync 失败，正在降级为 scp")
-        scp_remote = f"{self.username}@{self.host}:{self.remote_dir}"
-        scp_cmd = ["scp", "-r", scp_remote, str(self.local_dir.parent)]
+        scp_remote = f"{self.username}@{self.host}:{self.remote_dir}/."
+        scp_cmd = ["scp", "-r", scp_remote, str(self.local_dir)]
         scp_result = self._run_command(scp_cmd, "scp")
         if scp_result is not None and getattr(scp_result, "returncode", 1) == 0:
             self.finished.emit(self._result("scp", scp_result))

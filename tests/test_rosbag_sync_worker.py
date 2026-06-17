@@ -77,6 +77,39 @@ class RosbagSyncWorkerTests(unittest.TestCase):
         self.assertIn("降级为 scp", "\n".join(progress))
         self.assertEqual(results[0]["method"], "scp")
 
+    def test_scp_fallback_copies_remote_contents_into_target_dir(self) -> None:
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append(args)
+            if args[0] == "rsync":
+                raise FileNotFoundError("rsync")
+            return SimpleNamespace(returncode=0, stdout="copied", stderr="")
+
+        with temp_dir() as tmp:
+            local_dir = tmp / "session_1"
+            worker = RosbagSyncWorker(
+                host="192.168.0.14",
+                remote_dir="/bags/session_1",
+                local_dir=local_dir,
+                process_runner=runner,
+            )
+            results = []
+            worker.finished.connect(results.append)
+
+            worker.run()
+
+        self.assertEqual(
+            calls[1],
+            [
+                "scp",
+                "-r",
+                "wheeltec@192.168.0.14:/bags/session_1/.",
+                str(local_dir),
+            ],
+        )
+        self.assertEqual(results[0]["local_dir"], str(local_dir))
+
     def test_rsync_missing_falls_back_to_scp_and_scp_failure_reports_error(self) -> None:
         calls = []
 
