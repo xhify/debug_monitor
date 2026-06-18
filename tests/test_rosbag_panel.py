@@ -29,6 +29,28 @@ class RosbagPanelTests(unittest.TestCase):
         self.assertEqual(starts[0]["split_size_mb"], 2048)
         self.assertEqual(starts[0]["compression"], "lz4")
 
+    def test_mode_combo_shows_chinese_descriptions_but_keeps_mode_keys(self) -> None:
+        panel = RosbagPanel()
+
+        fastlio_index = panel._mode_combo.findData("fastlio")
+        fallback_index = panel._mode_combo.findData("fallback_no_fastlio")
+        custom_index = panel._mode_combo.findData("custom")
+
+        self.assertGreaterEqual(fastlio_index, 0)
+        self.assertGreaterEqual(fallback_index, 0)
+        self.assertGreaterEqual(custom_index, 0)
+        self.assertEqual(panel._mode_combo.itemData(fastlio_index), "fastlio")
+        self.assertEqual(panel._mode_combo.itemText(fastlio_index), "fastlio - FAST-LIO 定位常用")
+        self.assertIn("无 FAST-LIO 备用记录", panel._mode_combo.itemText(fallback_index))
+        self.assertEqual(panel._mode_combo.itemText(custom_index), "custom - 手动选择 topic")
+
+        panel._mode_combo.setCurrentIndex(fastlio_index)
+        config = panel.current_config()
+
+        self.assertEqual(panel._prefix_edit.text(), "fastlio")
+        self.assertEqual(config["prefix"], "fastlio")
+        self.assertIn("/point_cloud_filtered", config["topics"])
+
     def test_stop_button_does_not_emit_without_session_id(self) -> None:
         panel = RosbagPanel()
         stops = []

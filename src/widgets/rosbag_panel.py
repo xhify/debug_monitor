@@ -39,6 +39,16 @@ from rosbag_models import (
 )
 
 
+ROSBAG_MODE_OPTIONS = (
+    ("control", "control - 底盘控制与基础定位"),
+    ("fastlio", "fastlio - FAST-LIO 定位常用"),
+    ("trajectory_environment", "trajectory_environment - 轨迹与环境地图"),
+    ("fallback_no_fastlio", "fallback_no_fastlio - 无 FAST-LIO 备用记录"),
+    ("full", "full - 全量诊断记录"),
+    ("custom", "custom - 手动选择 topic"),
+)
+
+
 class RosbagPanel(QWidget):
     start_requested = Signal(object)
     stop_requested = Signal(str)
@@ -96,10 +106,12 @@ class RosbagPanel(QWidget):
         group = QGroupBox("录制配置")
         grid = QGridLayout(group)
         self._mode_combo = QComboBox()
-        for mode in ("control", "fastlio", "trajectory_environment", "fallback_no_fastlio", "full", "custom"):
-            self._mode_combo.addItem(mode, mode)
-        self._mode_combo.setCurrentText("fastlio")
-        self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        for mode, label in ROSBAG_MODE_OPTIONS:
+            self._mode_combo.addItem(label, mode)
+        fastlio_index = self._mode_combo.findData("fastlio")
+        if fastlio_index >= 0:
+            self._mode_combo.setCurrentIndex(fastlio_index)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
 
         self._remote_dir_edit = QLineEdit(DEFAULT_ROSBAG_REMOTE_DIR)
         self._prefix_edit = QLineEdit("fastlio")
@@ -137,7 +149,7 @@ class RosbagPanel(QWidget):
         grid.addLayout(topic_grid, 4, 0, 1, 4)
         grid.addWidget(QLabel("自定义 topic"), 5, 0)
         grid.addWidget(self._custom_topics_edit, 5, 1, 1, 3)
-        self._on_mode_changed("fastlio")
+        self._on_mode_changed()
         return group
 
     def _build_action_group(self) -> QGroupBox:
@@ -264,7 +276,8 @@ class RosbagPanel(QWidget):
         count = len(self._topics())
         self._topic_count_label.setText(f"{count} 个 topic")
 
-    def _on_mode_changed(self, mode: str) -> None:
+    def _on_mode_changed(self, _index: int | None = None) -> None:
+        mode = str(self._mode_combo.currentData() or "")
         if mode == "custom":
             return
         topics = ROSBAG_TOPIC_PRESETS.get(mode, [])
