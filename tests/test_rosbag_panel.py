@@ -158,7 +158,7 @@ class RosbagPanelTests(unittest.TestCase):
         deletes = []
         panel.delete_requested.connect(lambda session_id, confirm: deletes.append((session_id, confirm)))
 
-        active = RemoteRosbagSession(session_id="session_2", status="recording")
+        active = RemoteRosbagSession(session_id="session_2", status="stopped")
         panel.update_recording_status(RosbagRecordingStatus(active=True, session_id="session_2"))
         self.assertFalse(panel.request_delete_for_test(active))
         self.assertEqual(deletes, [])
