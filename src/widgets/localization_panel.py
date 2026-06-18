@@ -41,7 +41,6 @@ from app_config import (
     DEFAULT_ROSBRIDGE_HOST,
     DEFAULT_ROSBRIDGE_PORT,
 )
-from ros_odometry_client import RosOdometryWorker
 from ros_bridge_worker import normalize_ros_topic
 
 
@@ -50,6 +49,8 @@ class LocalizationPanel(QWidget):
 
     status_query_requested = Signal()
     fastlio_topic_changed = Signal(str)
+    fastlio_subscription_pending_changed = Signal(bool)
+    fastlio_subscription_apply_requested = Signal(bool)
     launch_manager_command_requested = Signal(str)
     line_follow_control_requested = Signal(float, bool, bool)
 
@@ -62,10 +63,6 @@ class LocalizationPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._buffer = LocalizationBuffer(max_points=5000)
-        self._worker = RosOdometryWorker()
-        self._worker.sample_received.connect(self._on_sample)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.connection_changed.connect(self._on_connection_changed)
         self._labels: dict[str, QLabel] = {}
         self._recording_started = False
         self._mapping_update_client = mapping_update_client
@@ -120,13 +117,25 @@ class LocalizationPanel(QWidget):
         self._topic_edit.setMinimumWidth(120)
         self._topic_edit.editingFinished.connect(self._on_fastlio_topic_edited)
         row.addWidget(self._topic_edit)
-        self._connect_btn = QPushButton("连接")
-        self._connect_btn.clicked.connect(self._connect)
+        self._fastlio_subscription_cb = QCheckBox("FAST-LIO 里程计")
+        self._fastlio_subscription_cb.toggled.connect(
+            self.fastlio_subscription_pending_changed.emit
+        )
+        row.addWidget(self._fastlio_subscription_cb)
+        self._apply_fastlio_subscription_btn = QPushButton("应用订阅")
+        self._apply_fastlio_subscription_btn.clicked.connect(
+            self._on_apply_fastlio_subscription
+        )
+        row.addWidget(self._apply_fastlio_subscription_btn)
+        self._connect_btn = QPushButton("请在 ROS 页连接")
+        self._connect_btn.setEnabled(False)
+        self._connect_btn.setToolTip("定位页使用 ROS 页的共享 ROSbridge 连接")
         row.addWidget(self._connect_btn)
         self._disconnect_btn = QPushButton("断开")
-        self._disconnect_btn.clicked.connect(self._worker.close_bridge)
+        self._disconnect_btn.setEnabled(False)
+        self._disconnect_btn.setToolTip("请在 ROS 页断开共享 ROSbridge 连接")
         row.addWidget(self._disconnect_btn)
-        self._connection_label = QLabel("未连接")
+        self._connection_label = QLabel("请在 ROS 页面连接共享 ROSbridge")
         row.addWidget(self._connection_label)
         self._online_label = QLabel("/Odometry: ---")
         row.addWidget(self._online_label)
@@ -353,13 +362,6 @@ class LocalizationPanel(QWidget):
         self._refresh_timer.timeout.connect(self._refresh_view)
         self._refresh_timer.start(100)
 
-    def _connect(self) -> None:
-        self._worker.open_bridge(
-            self._host_edit.text().strip() or "localhost",
-            self._port_spin.value(),
-            self._topic_edit.text().strip() or "/Odometry",
-        )
-
     def _on_fastlio_topic_edited(self) -> None:
         topic = self.fastlio_odometry_topic()
         self.set_fastlio_odometry_topic(topic)
@@ -373,14 +375,28 @@ class LocalizationPanel(QWidget):
         self._topic_edit.setText(normalize_ros_topic(topic))
         del blocker
 
+    def fastlio_subscription_enabled(self) -> bool:
+        return self._fastlio_subscription_cb.isChecked()
+
+    def set_fastlio_subscription_enabled(self, enabled: bool) -> None:
+        blocker = QSignalBlocker(self._fastlio_subscription_cb)
+        self._fastlio_subscription_cb.setChecked(bool(enabled))
+        del blocker
+
+    def _on_apply_fastlio_subscription(self) -> None:
+        self.fastlio_subscription_apply_requested.emit(
+            self.fastlio_subscription_enabled()
+        )
+
+    def set_fastlio_subscription_applied(self, enabled: bool) -> None:
+        state = "等待数据" if enabled else "已停用"
+        self._online_label.setText(f"{self.fastlio_odometry_topic()}: {state}")
+
     def set_shared_ros_connected(self, connected: bool) -> None:
         self._set_connected(connected)
 
     def accept_localization_sample(self, sample: LocalizationSample) -> None:
         self._on_sample(sample)
-
-    def _on_connection_changed(self, connected: bool) -> None:
-        self._set_connected(connected)
 
     def _set_connected(self, connected: bool) -> None:
         self._launch_buttons_connected = connected
@@ -395,14 +411,13 @@ class LocalizationPanel(QWidget):
             self._calibration_motion_active = False
             self._calibration_start_pending = False
             self._calibration_stop_pending = False
-        self._connect_btn.setEnabled(not connected)
-        self._disconnect_btn.setEnabled(connected)
-        self._host_edit.setEnabled(not connected)
-        self._port_spin.setEnabled(not connected)
-        self._topic_edit.setEnabled(not connected)
+        self._connect_btn.setEnabled(False)
+        self._disconnect_btn.setEnabled(False)
+        self._host_edit.setEnabled(False)
+        self._port_spin.setEnabled(False)
+        self._topic_edit.setEnabled(True)
         self._update_launch_buttons()
         self._update_calibration_buttons()
-        self._connection_label.setText("已连接" if connected else "未连接")
         self._connection_label.setStyleSheet("color: green;" if connected else "color: red;")
 
     def _on_sample(self, sample: LocalizationSample) -> None:
@@ -418,14 +433,16 @@ class LocalizationPanel(QWidget):
         self._fastlio_running = True
         self._fastlio_stop_pending = False
         self._update_launch_buttons()
-        self._worker.publish_launch_manager_command("start fastlio fast_lio mapping_c16.launch")
+        self.launch_manager_command_requested.emit(
+            "start fastlio fast_lio mapping_c16.launch"
+        )
         self.set_fastlio_launch_status("FAST-LIO 启动命令已发送")
         self.status_query_requested.emit()
 
     def _stop_fastlio_launch(self) -> None:
         self._fastlio_stop_pending = True
         self._update_launch_buttons()
-        self._worker.publish_launch_manager_command("stop fastlio")
+        self.launch_manager_command_requested.emit("stop fastlio")
         self.set_fastlio_launch_status("FAST-LIO 停止命令已发送")
         self.status_query_requested.emit()
 
@@ -437,14 +454,16 @@ class LocalizationPanel(QWidget):
         self._lidar_running = True
         self._lidar_stop_pending = False
         self._update_launch_buttons()
-        self._worker.publish_launch_manager_command("start lidar turn_on_wheeltec_robot wheeltec_lidar.launch")
+        self.launch_manager_command_requested.emit(
+            "start lidar turn_on_wheeltec_robot wheeltec_lidar.launch"
+        )
         self.set_lidar_launch_status("雷达节点启动命令已发送")
         self.status_query_requested.emit()
 
     def _stop_lidar_launch(self) -> None:
         self._lidar_stop_pending = True
         self._update_launch_buttons()
-        self._worker.publish_launch_manager_command("stop lidar")
+        self.launch_manager_command_requested.emit("stop lidar")
         self.set_lidar_launch_status("雷达节点停止命令已发送")
         self.status_query_requested.emit()
 
@@ -788,8 +807,8 @@ class LocalizationPanel(QWidget):
         return Path(tempfile.gettempdir()) / "debug_monitor_frozen_maps"
 
     def shutdown(self) -> None:
+        self._calibration_stop()
         self._refresh_timer.stop()
-        self._worker.close_bridge()
 
     def sizeHint(self) -> QSize:
         return QSize(1000, 560)

@@ -175,6 +175,8 @@ class MainWindow(QMainWindow):
         self._rosbridge_restart_worker: RosbridgeRestartWorker | None = None
         self._rosbridge_restore_topics: list[str] = []
         self._rosbridge_restore_fastlio_topic = DEFAULT_FASTLIO_ODOM_TOPIC
+        self._fastlio_subscription_applied = False
+        self._rosbridge_restore_fastlio_enabled = False
 
         self._setup_ui()
         self._setup_timers()
@@ -314,8 +316,20 @@ class MainWindow(QMainWindow):
         self._ros_panel.status_query_requested.connect(self._ros_worker.request_launch_manager_status)
         self._ros_panel.restart_requested.connect(self._on_rosbridge_restart_requested)
         self._ros_panel.fastlio_topic_changed.connect(self._on_fastlio_topic_changed)
+        self._ros_panel.fastlio_subscription_pending_changed.connect(
+            self._on_fastlio_subscription_pending_changed
+        )
+        self._ros_panel.fastlio_subscription_apply_requested.connect(
+            self._on_fastlio_subscription_apply_requested
+        )
         self._localization_panel.status_query_requested.connect(self._ros_worker.request_launch_manager_status)
         self._localization_panel.fastlio_topic_changed.connect(self._on_fastlio_topic_changed)
+        self._localization_panel.fastlio_subscription_pending_changed.connect(
+            self._on_fastlio_subscription_pending_changed
+        )
+        self._localization_panel.fastlio_subscription_apply_requested.connect(
+            self._on_fastlio_subscription_apply_requested
+        )
         self._localization_panel.launch_manager_command_requested.connect(
             self._publish_launch_manager_command
         )
@@ -339,6 +353,7 @@ class MainWindow(QMainWindow):
         self._module_stack.addWidget(self._localization_panel)
         self._module_stack.setCurrentWidget(self._encoder_page)
         self._on_fastlio_topic_changed(DEFAULT_FASTLIO_ODOM_TOPIC)
+        self._on_fastlio_subscription_pending_changed(False)
 
         self._status_label = QLabel("就绪")
         self.statusBar().addWidget(self._status_label, stretch=1)
@@ -1535,9 +1550,28 @@ class MainWindow(QMainWindow):
         self._localization_panel.set_fastlio_odometry_topic(normalized)
         self._ros_worker.update_fastlio_odometry_topic(normalized)
 
+    def _on_fastlio_subscription_pending_changed(self, enabled: bool) -> None:
+        self._ros_panel.set_fastlio_subscription_enabled(enabled)
+        self._localization_panel.set_fastlio_subscription_enabled(enabled)
+
+    def _on_fastlio_subscription_apply_requested(self, enabled: bool) -> None:
+        self._on_fastlio_subscription_pending_changed(enabled)
+        self._fastlio_subscription_applied = bool(enabled)
+        self._ros_worker.update_fastlio_subscription_enabled(
+            self._fastlio_subscription_applied
+        )
+        self._localization_panel.set_fastlio_subscription_applied(
+            self._fastlio_subscription_applied
+        )
+        state = "启用" if self._fastlio_subscription_applied else "停用"
+        self._status_label.setText(f"FAST-LIO 里程计订阅已{state}")
+
     def _on_ros_connect(self, host: str, port: int, enabled_data_topics: list[str]) -> None:
         self._ros_worker.update_fastlio_odometry_topic(
             self._ros_panel.fastlio_odometry_topic()
+        )
+        self._ros_worker.update_fastlio_subscription_enabled(
+            self._fastlio_subscription_applied
         )
         self._ros_worker.open_bridge(host, port, enabled_data_topics)
 
@@ -1546,6 +1580,7 @@ class MainWindow(QMainWindow):
             return
         self._rosbridge_restore_topics = self._ros_panel.selected_data_topics()
         self._rosbridge_restore_fastlio_topic = self._ros_panel.fastlio_odometry_topic()
+        self._rosbridge_restore_fastlio_enabled = self._fastlio_subscription_applied
         self._ros_worker.set_restarting(True)
         self._ros_worker.close_bridge()
 
@@ -1575,6 +1610,10 @@ class MainWindow(QMainWindow):
         self._ros_worker.update_fastlio_odometry_topic(
             self._rosbridge_restore_fastlio_topic
         )
+        self._fastlio_subscription_applied = self._rosbridge_restore_fastlio_enabled
+        self._ros_worker.update_fastlio_subscription_enabled(
+            self._rosbridge_restore_fastlio_enabled
+        )
         self._ros_worker.open_bridge(
             str(result["host"]),
             int(result["port"]),
@@ -1602,7 +1641,6 @@ class MainWindow(QMainWindow):
 
     def _on_rosbridge_health_changed(self, health: RosbridgeHealth) -> None:
         self._ros_panel.set_rosbridge_health(health)
-        self._localization_panel.set_shared_ros_connected(health.connected)
         summary_label = getattr(self, "_summary_rosbridge_status_label", None)
         if summary_label is not None:
             state_text = {

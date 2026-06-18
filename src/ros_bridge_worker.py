@@ -181,6 +181,7 @@ class RosBridgeSession:
         *,
         enabled_data_topics: Iterable[str] | None = None,
         fastlio_odometry_topic: str = "",
+        fastlio_subscription_enabled: bool = False,
         ros_factory: Callable[[str, int], Any] | None = None,
         topic_factory: Callable[[Any, str, str], Any] | None = None,
         message_factory: Callable[[dict], Any] | None = None,
@@ -212,6 +213,7 @@ class RosBridgeSession:
         self._fastlio_odometry_topic = (
             normalize_ros_topic(fastlio_odometry_topic) if fastlio_odometry_topic else ""
         )
+        self._fastlio_subscription_enabled = bool(fastlio_subscription_enabled)
         self._fastlio_topic: Any | None = None
         self._core_topics: dict[str, Any] = {}
         self._publish_topics: dict[str, Any] = {}
@@ -290,6 +292,19 @@ class RosBridgeSession:
             self._topics.pop(old_name, None)
             self._fastlio_topic = None
         self._fastlio_odometry_topic = normalized
+        self._subscribe_fastlio_topic()
+
+    def update_fastlio_subscription_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._fastlio_subscription_enabled:
+            return
+        self._fastlio_subscription_enabled = enabled
+        if not enabled:
+            if self._fastlio_topic is not None:
+                self._fastlio_topic.unsubscribe()
+                self._topics.pop(self._fastlio_odometry_topic, None)
+                self._fastlio_topic = None
+            return
         self._subscribe_fastlio_topic()
 
     def publish_cmd_vel(self, linear_x: float, angular_z: float) -> None:
@@ -388,6 +403,7 @@ class RosBridgeSession:
             not self.connected
             or self.ros is None
             or not self._fastlio_odometry_topic
+            or not self._fastlio_subscription_enabled
             or self._fastlio_odometry_topic in self._subscribed_data_topics
             or self._fastlio_topic is not None
         ):
@@ -579,7 +595,11 @@ class RosBridgeSession:
         message: dict,
         recv_time: float,
     ) -> None:
-        if topic_name != self._fastlio_odometry_topic or self._on_localization_sample is None:
+        if (
+            not self._fastlio_subscription_enabled
+            or topic_name != self._fastlio_odometry_topic
+            or self._on_localization_sample is None
+        ):
             return
         self._on_localization_sample(
             parse_odometry_message(
@@ -643,6 +663,7 @@ class RosBridgeWorker(QThread):
         self._port = DEFAULT_ROSBRIDGE_PORT
         self._enabled_data_topics: list[str] = []
         self._fastlio_odometry_topic = DEFAULT_FASTLIO_ODOM_TOPIC
+        self._fastlio_subscription_enabled = False
         self._error_count = 0
         self._network_latency_ms: float | None = None
         self._last_message_monotonic: float | None = None
@@ -695,6 +716,17 @@ class RosBridgeWorker(QThread):
         except Exception as exc:
             self._error_count += 1
             self.error_occurred.emit(f"FAST-LIO topic 更新失败: {exc}")
+
+    def update_fastlio_subscription_enabled(self, enabled: bool) -> None:
+        self._fastlio_subscription_enabled = bool(enabled)
+        try:
+            if self._session is not None and self._session.connected:
+                self._session.update_fastlio_subscription_enabled(
+                    self._fastlio_subscription_enabled
+                )
+        except Exception as exc:
+            self._error_count += 1
+            self.error_occurred.emit(f"FAST-LIO 订阅更新失败: {exc}")
 
     def set_restarting(self, restarting: bool) -> None:
         self._restarting = bool(restarting)
@@ -774,6 +806,7 @@ class RosBridgeWorker(QThread):
                 port=self._port,
                 enabled_data_topics=self._enabled_data_topics,
                 fastlio_odometry_topic=self._fastlio_odometry_topic,
+                fastlio_subscription_enabled=self._fastlio_subscription_enabled,
                 on_snapshot=self.snapshot_received.emit,
                 on_message=self._on_session_message,
                 on_launch_manager_status=self.launch_manager_status_received.emit,
@@ -829,7 +862,10 @@ class RosBridgeWorker(QThread):
                 consecutive_failures=self._consecutive_health_failures,
                 failure_threshold=ROSBRIDGE_HEALTH_FAILURE_THRESHOLD,
                 selected_topic_count=len(self._enabled_data_topics)
-                + int(bool(self._fastlio_odometry_topic)),
+                + int(
+                    self._fastlio_subscription_enabled
+                    and bool(self._fastlio_odometry_topic)
+                ),
                 last_message_age_s=last_message_age_s,
                 data_silence_s=ROSBRIDGE_DATA_SILENCE_S,
                 latency_ms=self._network_latency_ms,

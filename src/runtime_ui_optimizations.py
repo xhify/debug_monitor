@@ -473,22 +473,25 @@ def _unify_rosbridge_controls(window: Any) -> None:
             panel._port_spin.setValue(port_spin.value())
             panel._port_spin.setEnabled(False)
         if hasattr(panel, "_connect_btn"):
-            try:
-                panel._connect_btn.clicked.disconnect()
-            except Exception:
-                pass
             if panel is getattr(window, "_localization_panel", None):
-                panel._connect_btn.clicked.connect(
-                    lambda _checked=False, w=window: _open_unified_rosbridge_for_localization(w)
-                )
+                panel._connect_btn.setEnabled(False)
+                panel._connect_btn.setToolTip("定位页使用 ROS 页的共享 ROSbridge 连接")
             else:
+                try:
+                    panel._connect_btn.clicked.disconnect()
+                except Exception:
+                    pass
                 panel._connect_btn.clicked.connect(lambda _checked=False, w=window: _open_unified_rosbridge(w))
         if hasattr(panel, "_disconnect_btn"):
-            try:
-                panel._disconnect_btn.clicked.disconnect()
-            except Exception:
-                pass
-            panel._disconnect_btn.clicked.connect(window._ros_worker.close_bridge)
+            if panel is getattr(window, "_localization_panel", None):
+                panel._disconnect_btn.setEnabled(False)
+                panel._disconnect_btn.setToolTip("请在 ROS 页断开共享 ROSbridge 连接")
+            else:
+                try:
+                    panel._disconnect_btn.clicked.disconnect()
+                except Exception:
+                    pass
+                panel._disconnect_btn.clicked.connect(window._ros_worker.close_bridge)
         if panel is getattr(window, "_localization_panel", None):
             _wire_localization_to_unified_rosbridge(window, panel)
 
@@ -529,63 +532,6 @@ def _wire_localization_to_unified_rosbridge(window: Any, panel: Any) -> None:
         if label.text() in {"建图参数:", "地图 topic:", "本地地图路径:"}:
             label.setMinimumWidth(112)
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-    _replace_button_handler(
-        panel,
-        "_fastlio_launch_start_btn",
-        lambda _checked=False: _publish_unified_launch_command(
-            window,
-            panel,
-            "start fastlio fast_lio mapping_c16.launch",
-            "FAST-LIO 启动命令已发送",
-            "set_fastlio_launch_status",
-        ),
-    )
-    _replace_button_handler(
-        panel,
-        "_fastlio_launch_stop_btn",
-        lambda _checked=False: _publish_unified_launch_command(
-            window,
-            panel,
-            "stop fastlio",
-            "FAST-LIO 停止命令已发送",
-            "set_fastlio_launch_status",
-        ),
-    )
-    _replace_button_handler(
-        panel,
-        "_lidar_launch_start_btn",
-        lambda _checked=False: _publish_unified_launch_command(
-            window,
-            panel,
-            "start lidar turn_on_wheeltec_robot wheeltec_lidar.launch",
-            "雷达节点启动命令已发送",
-            "set_lidar_launch_status",
-        ),
-    )
-    _replace_button_handler(
-        panel,
-        "_lidar_launch_stop_btn",
-        lambda _checked=False: _publish_unified_launch_command(
-            window,
-            panel,
-            "stop lidar",
-            "雷达节点停止命令已发送",
-            "set_lidar_launch_status",
-        ),
-    )
-
-
-def _replace_button_handler(panel: Any, button_name: str, handler: Any) -> None:
-    button = getattr(panel, button_name, None)
-    if button is None:
-        return
-    try:
-        button.clicked.disconnect()
-    except Exception:
-        pass
-    button.clicked.connect(handler)
-
-
 def _form_contains_widgets(form: QFormLayout, widgets: set[Any]) -> bool:
     widgets.discard(None)
     for row in range(form.rowCount()):
@@ -611,19 +557,6 @@ def _ancestor_group(widget: Any) -> QGroupBox | None:
             return parent
         parent = parent.parent()
     return None
-
-
-def _publish_unified_launch_command(
-    window: Any,
-    panel: Any,
-    command: str,
-    status: str,
-    status_method_name: str,
-) -> None:
-    window._ros_worker.publish_launch_manager_command(command)
-    status_method = getattr(panel, status_method_name, None)
-    if status_method is not None:
-        status_method(status)
 
 
 def _set_localization_connected_state(window: Any, connected: bool) -> None:
@@ -686,20 +619,6 @@ def _open_unified_rosbridge(window: Any) -> None:
         else []
     )
     window._ros_worker.open_bridge(host, port, selected_topics)
-    _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
-
-
-def _open_unified_rosbridge_for_localization(window: Any) -> None:
-    host = window._ros_panel._host_edit.text().strip() or DEFAULT_ROSBRIDGE_HOST
-    port = window._ros_panel._port_spin.value()
-    topics = []
-    if hasattr(window._ros_panel, "selected_data_topics"):
-        topics.extend(window._ros_panel.selected_data_topics())
-    topic_edit = getattr(getattr(window, "_localization_panel", None), "_topic_edit", None)
-    odometry_topic = topic_edit.text().strip() if topic_edit is not None else ""
-    if odometry_topic:
-        window._ros_worker.update_fastlio_odometry_topic(odometry_topic)
-    window._ros_worker.open_bridge(host, port, topics)
     _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
 
 

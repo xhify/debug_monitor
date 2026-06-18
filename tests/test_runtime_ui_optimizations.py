@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QGroupBox
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from main_window import MainWindow
+from ros_bridge_worker import RosbridgeHealth
 from runtime_ui_optimizations import apply_runtime_ui_optimizations
 from widgets.localization_panel import LocalizationPanel
 
@@ -70,6 +71,47 @@ class RuntimeUiOptimizationTests(unittest.TestCase):
         self.assertEqual(window._ros_panel._status_label.text(), expected)
         self.assertEqual(window._ros_imu_panel._status_label.text(), expected)
         self.assertEqual(window._localization_panel._connection_label.text(), expected)
+
+    def test_health_refresh_does_not_overwrite_detailed_localization_status(self) -> None:
+        window = MainWindow()
+        detailed = (
+            "ROSbridge: 已连接 192.168.0.14:9090 / "
+            "网络延迟: 12.3 ms / 时钟差: -20.0 ms / 错误 0"
+        )
+        window._localization_panel._connection_label.setText(detailed)
+
+        window._on_rosbridge_health_changed(
+            RosbridgeHealth(
+                state="online",
+                connected=True,
+                latency_ms=12.3,
+                consecutive_failures=0,
+                last_message_age_s=0.1,
+                detail="ROS API 健康探测正常",
+            )
+        )
+
+        self.assertEqual(
+            window._localization_panel._connection_label.text(),
+            detailed,
+        )
+
+    def test_connection_state_refresh_does_not_overwrite_detailed_localization_status(
+        self,
+    ) -> None:
+        window = MainWindow()
+        detailed = (
+            "ROSbridge: 已连接 192.168.0.14:9090 / "
+            "网络延迟: 12.3 ms / 时钟差: -20.0 ms / 错误 0"
+        )
+        window._localization_panel._connection_label.setText(detailed)
+
+        window._localization_panel.set_shared_ros_connected(True)
+
+        self.assertEqual(
+            window._localization_panel._connection_label.text(),
+            detailed,
+        )
 
     def test_localization_panel_receives_odometry_from_unified_rosbridge(self) -> None:
         window = MainWindow()
@@ -244,22 +286,21 @@ class RuntimeUiOptimizationTests(unittest.TestCase):
         window._localization_panel._fastlio_launch_start_btn.click()
 
         self.assertFalse(window._localization_panel._connect_btn.isEnabled())
-        self.assertTrue(window._localization_panel._disconnect_btn.isEnabled())
+        self.assertFalse(window._localization_panel._disconnect_btn.isEnabled())
         self.assertEqual(commands, ["start fastlio fast_lio mapping_c16.launch"])
 
-    def test_localization_connect_subscribes_its_odometry_topic_on_shared_rosbridge(self) -> None:
+    def test_localization_connection_buttons_do_not_open_another_rosbridge(self) -> None:
         window = MainWindow()
         requests: list[tuple[str, int, list[str]]] = []
         topic_updates: list[str] = []
         window._ros_worker.open_bridge = lambda host, port, topics=None: requests.append((host, port, list(topics or [])))
         window._ros_worker.update_fastlio_odometry_topic = topic_updates.append
-        window._ros_panel._topic_checkboxes["/imu"].setChecked(False)
-        window._localization_panel._topic_edit.setText("/Odometry")
 
         window._localization_panel._connect_btn.click()
+        window._localization_panel._disconnect_btn.click()
 
-        self.assertEqual(topic_updates, ["/Odometry"])
-        self.assertEqual(requests, [("192.168.0.14", 9090, [])])
+        self.assertEqual(topic_updates, [])
+        self.assertEqual(requests, [])
 
 
 if __name__ == "__main__":

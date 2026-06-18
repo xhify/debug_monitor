@@ -373,7 +373,6 @@ class MainWindowReplayTests(unittest.TestCase):
         commands: list[str] = []
         queries: list[str] = []
         window._ros_worker.publish_launch_manager_command = commands.append
-        window._localization_panel._worker.publish_launch_manager_command = commands.append
         window._ros_worker.request_launch_manager_status = lambda: queries.append("query")
         window._ros_panel.set_connected(True)
         window._localization_panel._set_connected(True)
@@ -404,6 +403,71 @@ class MainWindowReplayTests(unittest.TestCase):
         )
         self.assertEqual(updates, ["/fastlio/custom"])
 
+    def test_fastlio_subscription_pending_state_syncs_without_applying(self) -> None:
+        window = MainWindow()
+        applied: list[bool] = []
+        window._ros_worker.update_fastlio_subscription_enabled = applied.append
+
+        window._localization_panel._fastlio_subscription_cb.setChecked(True)
+
+        self.assertTrue(window._ros_panel.fastlio_subscription_enabled())
+        self.assertTrue(window._localization_panel.fastlio_subscription_enabled())
+        self.assertEqual(applied, [])
+
+    def test_fastlio_subscription_apply_from_either_page_updates_shared_worker(self) -> None:
+        window = MainWindow()
+        applied: list[bool] = []
+        window._ros_worker.update_fastlio_subscription_enabled = applied.append
+
+        window._ros_panel._topic_checkboxes["/Odometry"].setChecked(True)
+        window._localization_panel._apply_fastlio_subscription_btn.click()
+        window._ros_panel._topic_checkboxes["/Odometry"].setChecked(False)
+        window._ros_panel._apply_subscriptions_btn.click()
+
+        self.assertEqual(applied, [True, False])
+        self.assertFalse(window._fastlio_subscription_applied)
+        self.assertIn("已停用", window._localization_panel._online_label.text())
+
+    def test_enabling_fastlio_subscription_waits_for_fresh_sample(self) -> None:
+        window = MainWindow()
+        window._ros_worker.update_fastlio_subscription_enabled = lambda enabled: None
+        window._localization_panel._online_label.setText("/Odometry: 在线")
+        window._localization_panel.set_fastlio_subscription_enabled(True)
+
+        window._localization_panel._apply_fastlio_subscription_btn.click()
+
+        self.assertEqual(
+            window._localization_panel._online_label.text(),
+            "/Odometry: 等待数据",
+        )
+
+    def test_ros_connect_applies_fastlio_subscription_before_opening(self) -> None:
+        window = MainWindow()
+        calls: list[tuple] = []
+        window._fastlio_subscription_applied = True
+        window._ros_worker.update_fastlio_odometry_topic = (
+            lambda topic: calls.append(("topic", topic))
+        )
+        window._ros_worker.update_fastlio_subscription_enabled = (
+            lambda enabled: calls.append(("enabled", enabled))
+        )
+        window._ros_worker.open_bridge = (
+            lambda host, port, topics=None: calls.append(
+                ("open", host, port, list(topics or []))
+            )
+        )
+
+        window._on_ros_connect("192.168.0.14", 9090, ["/imu"])
+
+        self.assertEqual(
+            calls,
+            [
+                ("topic", "/Odometry"),
+                ("enabled", True),
+                ("open", "192.168.0.14", 9090, ["/imu"]),
+            ],
+        )
+
     def test_shared_worker_localization_sample_reaches_localization_panel(self) -> None:
         window = MainWindow()
         sample = LocalizationSample(
@@ -433,8 +497,12 @@ class MainWindowReplayTests(unittest.TestCase):
         calls: list[tuple] = []
         window._rosbridge_restore_topics = ["/imu"]
         window._rosbridge_restore_fastlio_topic = "/fastlio/odom"
+        window._rosbridge_restore_fastlio_enabled = True
         window._ros_worker.update_fastlio_odometry_topic = (
             lambda topic: calls.append(("topic", topic))
+        )
+        window._ros_worker.update_fastlio_subscription_enabled = (
+            lambda enabled: calls.append(("enabled", enabled))
         )
         window._ros_worker.open_bridge = (
             lambda host, port, topics=None: calls.append(
@@ -450,6 +518,7 @@ class MainWindowReplayTests(unittest.TestCase):
             calls,
             [
                 ("topic", "/fastlio/odom"),
+                ("enabled", True),
                 ("open", "192.168.0.14", 9090, ["/imu"]),
             ],
         )
@@ -481,7 +550,7 @@ class MainWindowReplayTests(unittest.TestCase):
     def test_localization_panel_fastlio_launch_buttons_publish_launch_manager_commands(self) -> None:
         window = MainWindow()
         commands: list[str] = []
-        window._localization_panel._worker.publish_launch_manager_command = commands.append
+        window._ros_worker.publish_launch_manager_command = commands.append
         window._localization_panel._set_connected(True)
 
         window._localization_panel._fastlio_launch_start_btn.click()
@@ -494,6 +563,13 @@ class MainWindowReplayTests(unittest.TestCase):
                 "stop fastlio",
             ],
         )
+
+    def test_localization_panel_uses_only_shared_rosbridge_worker(self) -> None:
+        window = MainWindow()
+
+        self.assertFalse(hasattr(window._localization_panel, "_worker"))
+        self.assertFalse(window._localization_panel._connect_btn.isEnabled())
+        self.assertFalse(window._localization_panel._disconnect_btn.isEnabled())
 
     def test_launch_manager_status_updates_ros_and_localization_node_labels(self) -> None:
         window = MainWindow()

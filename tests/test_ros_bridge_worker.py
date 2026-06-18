@@ -124,6 +124,7 @@ class RosBridgeSessionTests(unittest.TestCase):
             host="192.168.0.14",
             port=9090,
             fastlio_odometry_topic="/custom_odom",
+            fastlio_subscription_enabled=True,
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
             on_localization_sample=samples.append,
@@ -153,6 +154,7 @@ class RosBridgeSessionTests(unittest.TestCase):
             host="192.168.0.14",
             port=9090,
             fastlio_odometry_topic="/Odometry",
+            fastlio_subscription_enabled=True,
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
         )
@@ -170,6 +172,7 @@ class RosBridgeSessionTests(unittest.TestCase):
             port=9090,
             enabled_data_topics=["/Odometry"],
             fastlio_odometry_topic="/Odometry",
+            fastlio_subscription_enabled=True,
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
         )
@@ -184,6 +187,7 @@ class RosBridgeSessionTests(unittest.TestCase):
             host="192.168.0.14",
             port=9090,
             fastlio_odometry_topic="/Odometry",
+            fastlio_subscription_enabled=True,
             ros_factory=FakeRos,
             topic_factory=FakeTopic,
         )
@@ -199,6 +203,84 @@ class RosBridgeSessionTests(unittest.TestCase):
             if topic.name == "/Odometry" and not topic.unsubscribed
         ]
         self.assertEqual(len(active_topics), 1)
+
+    def test_disabling_fastlio_stops_localization_samples_when_data_subscription_remains(
+        self,
+    ) -> None:
+        samples = []
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            enabled_data_topics=["/Odometry"],
+            fastlio_odometry_topic="/Odometry",
+            fastlio_subscription_enabled=True,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            on_localization_sample=samples.append,
+        )
+        session.connect()
+
+        session.update_fastlio_subscription_enabled(False)
+        session.topic("/Odometry").callback(
+            {
+                "pose": {
+                    "pose": {
+                        "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+                        "orientation": {"w": 1.0},
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(samples, [])
+
+    def test_disabled_fastlio_subscription_creates_no_odometry_topic(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            fastlio_odometry_topic="/Odometry",
+            fastlio_subscription_enabled=False,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+
+        session.connect()
+
+        self.assertNotIn("/Odometry", session._topics)
+
+    def test_fastlio_subscription_can_be_enabled_and_disabled_at_runtime(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            fastlio_odometry_topic="/Odometry",
+            fastlio_subscription_enabled=False,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.update_fastlio_subscription_enabled(True)
+        topic = session.topic("/Odometry")
+        session.update_fastlio_subscription_enabled(False)
+
+        self.assertTrue(topic.unsubscribed)
+        self.assertNotIn("/Odometry", session._topics)
+
+    def test_changing_fastlio_topic_while_disabled_does_not_subscribe(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            fastlio_odometry_topic="/Odometry",
+            fastlio_subscription_enabled=False,
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+
+        session.update_fastlio_odometry_topic("/fastlio/custom")
+
+        self.assertNotIn("/Odometry", session._topics)
+        self.assertNotIn("/fastlio/custom", session._topics)
 
     def test_update_data_subscriptions_subscribes_and_unsubscribes_without_touching_core(self) -> None:
         session = RosBridgeSession(

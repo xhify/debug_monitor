@@ -35,10 +35,6 @@ from ros_bridge_worker import RosSnapshot, RosbridgeHealth, normalize_ros_topic
 from ros_data import RosCsvRecordingSession, RosTimeSeriesBuffer
 
 PID_LAUNCH_COMMAND = "start pid_control simple_follower pid_control.launch"
-RADAR_CALIBRATION_LAUNCH_COMMAND = (
-    "restart pid_control simple_follower pid_control_lidar_assisted.launch "
-    "imu_topic:=/active_imu lidar_odom_topic:=/Odometry"
-)
 PID_LAUNCH_STOP_COMMAND = "stop pid_control"
 
 
@@ -54,6 +50,8 @@ class RosPanel(QWidget):
     status_query_requested = Signal()
     restart_requested = Signal(str, int)
     fastlio_topic_changed = Signal(str)
+    fastlio_subscription_pending_changed = Signal(bool)
+    fastlio_subscription_apply_requested = Signal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -249,6 +247,10 @@ class RosPanel(QWidget):
             checkbox.setToolTip(topic)
             checkbox.setChecked(False)
             self._topic_checkboxes[topic] = checkbox
+            if topic == DEFAULT_FASTLIO_ODOM_TOPIC:
+                checkbox.toggled.connect(
+                    self.fastlio_subscription_pending_changed.emit
+                )
             grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(grid)
 
@@ -432,8 +434,21 @@ class RosPanel(QWidget):
         self._fastlio_topic_edit.setText(normalized)
         del blocker
 
+    def fastlio_subscription_enabled(self) -> bool:
+        return self._topic_checkboxes[DEFAULT_FASTLIO_ODOM_TOPIC].isChecked()
+
+    def set_fastlio_subscription_enabled(self, enabled: bool) -> None:
+        checkbox = self._topic_checkboxes[DEFAULT_FASTLIO_ODOM_TOPIC]
+        blocker = QSignalBlocker(checkbox)
+        checkbox.setChecked(bool(enabled))
+        del blocker
+
     def selected_data_topics(self) -> list[str]:
-        return [topic for topic, checkbox in self._topic_checkboxes.items() if checkbox.isChecked()]
+        return [
+            topic
+            for topic, checkbox in self._topic_checkboxes.items()
+            if topic != DEFAULT_FASTLIO_ODOM_TOPIC and checkbox.isChecked()
+        ]
 
     def _apply_topic_preset(self, preset_key: str) -> None:
         selected = set(ROSBRIDGE_DATA_TOPIC_PRESETS.get(preset_key, []))
@@ -442,6 +457,9 @@ class RosPanel(QWidget):
 
     def _on_apply_subscriptions(self) -> None:
         self.data_subscriptions_changed.emit(self.selected_data_topics())
+        self.fastlio_subscription_apply_requested.emit(
+            self.fastlio_subscription_enabled()
+        )
 
     def _on_send_cmd_vel(self) -> None:
         linear_x = self._linear_x_spin.value()
@@ -485,7 +503,10 @@ class RosPanel(QWidget):
         self._active_launch_variant = "radar_calibration"
         self._launch_stop_pending = False
         self._update_launch_button_guard()
-        self.launch_manager_command_requested.emit(RADAR_CALIBRATION_LAUNCH_COMMAND)
+        self.launch_manager_command_requested.emit(
+            "restart pid_control simple_follower pid_control_lidar_assisted.launch "
+            f"imu_topic:=/active_imu lidar_odom_topic:={self.fastlio_odometry_topic()}"
+        )
         self.set_pid_launch_status("雷达直线校准节点启动命令已发送")
         self.status_query_requested.emit()
 

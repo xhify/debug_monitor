@@ -60,6 +60,31 @@ class RosPanelTests(unittest.TestCase):
         self.assertEqual(panel.fastlio_odometry_topic(), "/custom_odom")
         self.assertEqual(topics, ["/custom_odom"])
 
+    def test_fastlio_subscription_checkbox_emits_pending_state(self) -> None:
+        panel = RosPanel()
+        states: list[bool] = []
+        panel.fastlio_subscription_pending_changed.connect(states.append)
+
+        panel.set_fastlio_subscription_enabled(True)
+        panel._topic_checkboxes["/Odometry"].setChecked(False)
+
+        self.assertFalse(panel.fastlio_subscription_enabled())
+        self.assertEqual(states, [False])
+
+    def test_apply_subscriptions_emits_fastlio_state_separately(self) -> None:
+        panel = RosPanel()
+        states: list[bool] = []
+        data_topics: list[list[str]] = []
+        panel.fastlio_subscription_apply_requested.connect(states.append)
+        panel.data_subscriptions_changed.connect(lambda topics: data_topics.append(list(topics)))
+        panel.set_fastlio_subscription_enabled(True)
+        panel._topic_checkboxes["/imu"].setChecked(True)
+
+        panel._apply_subscriptions_btn.click()
+
+        self.assertEqual(states, [True])
+        self.assertEqual(data_topics, [["/imu"]])
+
     def test_health_state_updates_label_and_restart_button(self) -> None:
         panel = RosPanel()
 
@@ -89,12 +114,18 @@ class RosPanelTests(unittest.TestCase):
 
         panel._preset_buttons["none"].click()
         self.assertEqual(panel.selected_data_topics(), [])
+        self.assertFalse(panel.fastlio_subscription_enabled())
 
         panel._preset_buttons["basic_low_bandwidth"].click()
         self.assertEqual(panel.selected_data_topics(), ["/odom", "/imu"])
+        self.assertFalse(panel.fastlio_subscription_enabled())
 
         panel._preset_buttons["full"].click()
-        self.assertEqual(set(panel.selected_data_topics()), set(panel._topic_checkboxes))
+        self.assertEqual(
+            set(panel.selected_data_topics()),
+            set(panel._topic_checkboxes) - {"/Odometry"},
+        )
+        self.assertTrue(panel.fastlio_subscription_enabled())
         self.assertNotIn("/launch_manager/status", panel.selected_data_topics())
 
     def test_apply_data_subscriptions_emits_selected_topics(self) -> None:
@@ -160,6 +191,7 @@ class RosPanelTests(unittest.TestCase):
         panel = RosPanel()
         commands: list[str] = []
         panel.launch_manager_command_requested.connect(commands.append)
+        panel.set_fastlio_odometry_topic("/fastlio/custom_odom")
         panel.set_connected(True)
 
         panel._radar_calibration_launch_start_btn.click()
@@ -169,7 +201,7 @@ class RosPanelTests(unittest.TestCase):
             commands,
             [
                 "restart pid_control simple_follower pid_control_lidar_assisted.launch "
-                "imu_topic:=/active_imu lidar_odom_topic:=/Odometry",
+                "imu_topic:=/active_imu lidar_odom_topic:=/fastlio/custom_odom",
                 "stop pid_control",
             ],
         )

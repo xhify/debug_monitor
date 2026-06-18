@@ -106,6 +106,36 @@ class LocalizationPanelTests(unittest.TestCase):
         self.assertEqual(panel.fastlio_odometry_topic(), "/Odometry2")
         self.assertEqual(topics, ["/Odometry2"])
 
+    def test_fastlio_subscription_checkbox_emits_pending_state(self) -> None:
+        panel = LocalizationPanel()
+        states: list[bool] = []
+        panel.fastlio_subscription_pending_changed.connect(states.append)
+
+        panel._fastlio_subscription_cb.setChecked(True)
+
+        self.assertTrue(panel.fastlio_subscription_enabled())
+        self.assertEqual(states, [True])
+
+    def test_fastlio_subscription_apply_button_emits_current_state(self) -> None:
+        panel = LocalizationPanel()
+        states: list[bool] = []
+        panel.fastlio_subscription_apply_requested.connect(states.append)
+        panel.set_fastlio_subscription_enabled(True)
+
+        panel._apply_fastlio_subscription_btn.click()
+
+        self.assertEqual(states, [True])
+
+    def test_setting_fastlio_subscription_state_does_not_reemit_pending_signal(self) -> None:
+        panel = LocalizationPanel()
+        states: list[bool] = []
+        panel.fastlio_subscription_pending_changed.connect(states.append)
+
+        panel.set_fastlio_subscription_enabled(True)
+
+        self.assertTrue(panel.fastlio_subscription_enabled())
+        self.assertEqual(states, [])
+
     def test_shared_localization_sample_updates_buffer(self) -> None:
         panel = LocalizationPanel()
 
@@ -113,6 +143,14 @@ class LocalizationPanelTests(unittest.TestCase):
 
         self.assertAlmostEqual(panel._buffer.latest().x, 2.0)
         self.assertIn("在线", panel._online_label.text())
+
+    def test_panel_has_no_private_ros_odometry_worker(self) -> None:
+        panel = LocalizationPanel()
+
+        self.assertFalse(hasattr(panel, "_worker"))
+        self.assertFalse(panel._connect_btn.isEnabled())
+        self.assertFalse(panel._disconnect_btn.isEnabled())
+        self.assertIn("ROS", panel._connection_label.text())
 
     def test_calibration_launch_uses_current_fastlio_topic(self) -> None:
         panel = LocalizationPanel()
@@ -212,7 +250,7 @@ class LocalizationPanelTests(unittest.TestCase):
     def test_lidar_launch_buttons_publish_launch_manager_commands(self) -> None:
         panel = LocalizationPanel()
         commands: list[str] = []
-        panel._worker.publish_launch_manager_command = commands.append
+        panel.launch_manager_command_requested.connect(commands.append)
 
         panel._set_connected(True)
         panel._lidar_launch_start_btn.click()
@@ -226,6 +264,23 @@ class LocalizationPanelTests(unittest.TestCase):
             ],
         )
         self.assertIn("雷达", panel._lidar_launch_label.text())
+
+    def test_fastlio_launch_buttons_publish_launch_manager_signals(self) -> None:
+        panel = LocalizationPanel()
+        commands: list[str] = []
+        panel.launch_manager_command_requested.connect(commands.append)
+
+        panel._set_connected(True)
+        panel._fastlio_launch_start_btn.click()
+        panel._fastlio_launch_stop_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "start fastlio fast_lio mapping_c16.launch",
+                "stop fastlio",
+            ],
+        )
 
     def test_launch_buttons_request_status_after_commands(self) -> None:
         panel = LocalizationPanel()
