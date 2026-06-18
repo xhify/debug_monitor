@@ -250,13 +250,16 @@ class RuntimeUiOptimizationTests(unittest.TestCase):
     def test_localization_connect_subscribes_its_odometry_topic_on_shared_rosbridge(self) -> None:
         window = MainWindow()
         requests: list[tuple[str, int, list[str]]] = []
+        topic_updates: list[str] = []
         window._ros_worker.open_bridge = lambda host, port, topics=None: requests.append((host, port, list(topics or [])))
+        window._ros_worker.update_fastlio_odometry_topic = topic_updates.append
         window._ros_panel._topic_checkboxes["/imu"].setChecked(False)
         window._localization_panel._topic_edit.setText("/Odometry")
 
         window._localization_panel._connect_btn.click()
 
-        self.assertEqual(requests, [("192.168.0.14", 9090, ["/Odometry"])])
+        self.assertEqual(topic_updates, ["/Odometry"])
+        self.assertEqual(requests, [("192.168.0.14", 9090, [])])
 
 
 if __name__ == "__main__":

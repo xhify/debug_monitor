@@ -15,12 +15,34 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 DEFAULT_ROSBRIDGE_HOST = os.getenv("DEBUG_MONITOR_ROSBRIDGE_HOST", "192.168.0.14")
 DEFAULT_ROSBRIDGE_PORT = _env_int("DEBUG_MONITOR_ROSBRIDGE_PORT", 9090)
 DEFAULT_FASTLIO_ODOM_TOPIC = os.getenv("DEBUG_MONITOR_FASTLIO_ODOM_TOPIC", "/Odometry")
 DEFAULT_MAP_TOPIC = os.getenv("DEBUG_MONITOR_MAP_TOPIC", "/Laser_map")
 DEFAULT_MAP_UPDATE_PARAM = os.getenv("DEBUG_MONITOR_MAP_UPDATE_PARAM", "/mapping/map_update_enable")
 DEFAULT_RECORDINGS_DIR = os.getenv("DEBUG_MONITOR_RECORDINGS_DIR", r"D:\debug_monitor\recordings")
+DEFAULT_ROS_SSH_USER = os.getenv("DEBUG_MONITOR_ROS_SSH_USER", "wheeltec")
+DEFAULT_SSH_EXECUTABLE = os.getenv("DEBUG_MONITOR_SSH_EXECUTABLE", "ssh")
+ROSBRIDGE_RESTART_TIMEOUT_S = _env_float("DEBUG_MONITOR_ROSBRIDGE_RESTART_TIMEOUT_S", 15.0)
+ROSBRIDGE_RESTART_PROBE_INTERVAL_S = _env_float(
+    "DEBUG_MONITOR_ROSBRIDGE_RESTART_PROBE_INTERVAL_S",
+    0.25,
+)
+ROSBRIDGE_HEALTH_FAILURE_THRESHOLD = _env_int(
+    "DEBUG_MONITOR_ROSBRIDGE_HEALTH_FAILURE_THRESHOLD",
+    3,
+)
+ROSBRIDGE_DATA_SILENCE_S = _env_float("DEBUG_MONITOR_ROSBRIDGE_DATA_SILENCE_S", 3.0)
 
 ROSBRIDGE_DATA_TOPIC_OPTIONS = (
     {"topic": "/odom", "type": "nav_msgs/Odometry", "label": "里程计 /odom"},

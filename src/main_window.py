@@ -45,7 +45,8 @@ from recording_session import RecordingSession
 from radar_bin_parser import parse_radar_recording
 from radar_scpi import RadarScpiClient
 from replay_data import ReplayData
-from ros_bridge_worker import RosBridgeWorker
+from ros_bridge_worker import RosBridgeWorker, RosbridgeHealth, normalize_ros_topic
+from rosbridge_restart_worker import RosbridgeRestartConfig, RosbridgeRestartWorker
 from rosbag_models import (
     RemoteRosbagSession,
     RosbagLibraryState,
@@ -164,11 +165,16 @@ class MainWindow(QMainWindow):
         self._summary_latest_rosbag_status: dict[str, object] = {}
         self._ros_topic_frame_counts: dict[str, int] = {}
         self._ros_connected = False
+        self._launch_status_query_tick = 0
         self._radar_client = RadarScpiClient()
         self._hr23_radar_client_factory = Hr23RadarClient
         self._summary_hr23_session_client = None
         self._summary_hr23_active = False
         self._summary_hr23_session_metadata: dict[str, object] = {}
+        self._rosbridge_restart_thread: QThread | None = None
+        self._rosbridge_restart_worker: RosbridgeRestartWorker | None = None
+        self._rosbridge_restore_topics: list[str] = []
+        self._rosbridge_restore_fastlio_topic = DEFAULT_FASTLIO_ODOM_TOPIC
 
         self._setup_ui()
         self._setup_timers()
@@ -305,6 +311,21 @@ class MainWindow(QMainWindow):
         self._ros_panel.cmd_vel_requested.connect(self._ros_worker.publish_cmd_vel)
         self._ros_panel.pid_control_requested.connect(self._ros_worker.publish_line_follow_control)
         self._ros_panel.launch_manager_command_requested.connect(self._publish_launch_manager_command)
+        self._ros_panel.status_query_requested.connect(self._ros_worker.request_launch_manager_status)
+        self._ros_panel.restart_requested.connect(self._on_rosbridge_restart_requested)
+        self._ros_panel.fastlio_topic_changed.connect(self._on_fastlio_topic_changed)
+        self._localization_panel.status_query_requested.connect(self._ros_worker.request_launch_manager_status)
+        self._localization_panel.fastlio_topic_changed.connect(self._on_fastlio_topic_changed)
+        self._localization_panel.launch_manager_command_requested.connect(
+            self._publish_launch_manager_command
+        )
+        self._localization_panel.line_follow_control_requested.connect(
+            self._ros_worker.publish_line_follow_control
+        )
+        self._ros_worker.localization_sample_received.connect(
+            self._localization_panel.accept_localization_sample
+        )
+        self._ros_worker.health_changed.connect(self._on_rosbridge_health_changed)
         self._ros_imu_panel.connect_requested.connect(self._ros_worker.open_bridge)
         self._ros_imu_panel.disconnect_requested.connect(self._ros_worker.close_bridge)
         self._connect_rosbag_panel_signals()
@@ -317,6 +338,7 @@ class MainWindow(QMainWindow):
         self._module_stack.addWidget(self._rosbag_panel)
         self._module_stack.addWidget(self._localization_panel)
         self._module_stack.setCurrentWidget(self._encoder_page)
+        self._on_fastlio_topic_changed(DEFAULT_FASTLIO_ODOM_TOPIC)
 
         self._status_label = QLabel("就绪")
         self.statusBar().addWidget(self._status_label, stretch=1)
@@ -1507,17 +1529,105 @@ class MainWindow(QMainWindow):
         self._ros_worker.publish_launch_manager_command(command)
         self._status_label.setText(f"launch_manager 命令已发送: {command}")
 
+    def _on_fastlio_topic_changed(self, topic: str) -> None:
+        normalized = normalize_ros_topic(topic, DEFAULT_FASTLIO_ODOM_TOPIC)
+        self._ros_panel.set_fastlio_odometry_topic(normalized)
+        self._localization_panel.set_fastlio_odometry_topic(normalized)
+        self._ros_worker.update_fastlio_odometry_topic(normalized)
+
     def _on_ros_connect(self, host: str, port: int, enabled_data_topics: list[str]) -> None:
+        self._ros_worker.update_fastlio_odometry_topic(
+            self._ros_panel.fastlio_odometry_topic()
+        )
         self._ros_worker.open_bridge(host, port, enabled_data_topics)
+
+    def _on_rosbridge_restart_requested(self, host: str, port: int) -> None:
+        if self._rosbridge_restart_thread is not None:
+            return
+        self._rosbridge_restore_topics = self._ros_panel.selected_data_topics()
+        self._rosbridge_restore_fastlio_topic = self._ros_panel.fastlio_odometry_topic()
+        self._ros_worker.set_restarting(True)
+        self._ros_worker.close_bridge()
+
+        thread = QThread(self)
+        worker = RosbridgeRestartWorker(
+            RosbridgeRestartConfig(host=host, port=port)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_rosbridge_restart_progress)
+        worker.finished.connect(self._on_rosbridge_restart_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(self._on_rosbridge_restart_error)
+        worker.error.connect(worker.deleteLater)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(self._cleanup_rosbridge_restart_thread)
+        thread.finished.connect(thread.deleteLater)
+        self._rosbridge_restart_thread = thread
+        self._rosbridge_restart_worker = worker
+        thread.start()
+
+    def _on_rosbridge_restart_progress(self, message: str) -> None:
+        self._status_label.setText(message)
+
+    def _on_rosbridge_restart_finished(self, result: dict[str, object]) -> None:
+        self._ros_worker.update_fastlio_odometry_topic(
+            self._rosbridge_restore_fastlio_topic
+        )
+        self._ros_worker.open_bridge(
+            str(result["host"]),
+            int(result["port"]),
+            self._rosbridge_restore_topics,
+        )
+        self._status_label.setText("ROSbridge 已重启，正在恢复连接")
+
+    def _on_rosbridge_restart_error(self, message: str) -> None:
+        self._ros_worker.set_restarting(False)
+        self._status_label.setText(f"ROSbridge 重启失败: {message}")
+        self._ros_panel.set_rosbridge_health(
+            RosbridgeHealth(
+                state="abnormal",
+                connected=False,
+                latency_ms=None,
+                consecutive_failures=1,
+                last_message_age_s=None,
+                detail=message,
+            )
+        )
+
+    def _cleanup_rosbridge_restart_thread(self) -> None:
+        self._rosbridge_restart_worker = None
+        self._rosbridge_restart_thread = None
+
+    def _on_rosbridge_health_changed(self, health: RosbridgeHealth) -> None:
+        self._ros_panel.set_rosbridge_health(health)
+        self._localization_panel.set_shared_ros_connected(health.connected)
+        summary_label = getattr(self, "_summary_rosbridge_status_label", None)
+        if summary_label is not None:
+            state_text = {
+                "disconnected": "未连接",
+                "connecting": "连接中",
+                "online": "在线",
+                "data_silent": "数据静默",
+                "abnormal": "异常",
+                "restarting": "重启中",
+            }.get(health.state, health.state)
+            summary_label.setText(f"ROSbridge {state_text}: {health.detail}")
 
     def _on_ros_connection_changed(self, connected: bool) -> None:
         self._ros_connected = connected
+        if connected and getattr(self._ros_worker, "_restarting", False):
+            self._ros_worker.set_restarting(False)
         self._ros_topic_frame_counts.clear()
         self._summary_last_counts.pop("encoder", None)
         self._ros_panel.set_connected(connected)
         self._ros_imu_panel.set_connected(connected)
+        self._localization_panel.set_shared_ros_connected(connected)
         self._summary_rosbag_status_label.setText("ROSbridge 已连接" if connected else "ROSbridge 未连接")
         self._status_label.setText("ROS 已连接" if connected else "ROS 已断开")
+        if connected and getattr(self._ros_worker, "_session", None) is not None:
+            self._ros_worker.request_launch_manager_status()
 
     def _on_ros_snapshot(self, snapshot) -> None:
         self._latest_ros_snapshot = snapshot
@@ -1561,6 +1671,8 @@ class MainWindow(QMainWindow):
             return
         data = rosbag_protocol_data(payload)
         protocol_error = extract_rosbag_protocol_error(payload)
+        self._ros_panel.update_launch_manager_status(data)
+        self._localization_panel.update_launch_manager_status(data)
         if protocol_error:
             self._status_label.setText(f"rosbag 错误: {protocol_error}")
             self._rosbag_panel.append_log(protocol_error)
@@ -1707,6 +1819,11 @@ class MainWindow(QMainWindow):
             self._record_label.setText(f"记录中: {self._buffer.csv_rows_written} 行")
         else:
             self._record_label.setText("")
+        if self._ros_connected and getattr(self._ros_worker, "_session", None) is not None:
+            self._launch_status_query_tick += 1
+            if self._launch_status_query_tick >= 2:
+                self._launch_status_query_tick = 0
+                self._ros_worker.request_launch_manager_status()
         self._update_summary_status()
 
     def _update_summary_status(self) -> None:

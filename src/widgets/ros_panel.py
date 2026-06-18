@@ -6,7 +6,7 @@ import tempfile
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -25,12 +25,13 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from app_config import (
+    DEFAULT_FASTLIO_ODOM_TOPIC,
     DEFAULT_ROSBRIDGE_HOST,
     DEFAULT_ROSBRIDGE_PORT,
     ROSBRIDGE_DATA_TOPIC_OPTIONS,
     ROSBRIDGE_DATA_TOPIC_PRESETS,
 )
-from ros_bridge_worker import RosSnapshot
+from ros_bridge_worker import RosSnapshot, RosbridgeHealth, normalize_ros_topic
 from ros_data import RosCsvRecordingSession, RosTimeSeriesBuffer
 
 PID_LAUNCH_COMMAND = "start pid_control simple_follower pid_control.launch"
@@ -50,6 +51,9 @@ class RosPanel(QWidget):
     cmd_vel_requested = Signal(float, float)
     pid_control_requested = Signal(float, bool, bool)
     launch_manager_command_requested = Signal(str)
+    status_query_requested = Signal()
+    restart_requested = Signal(str, int)
+    fastlio_topic_changed = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -63,6 +67,7 @@ class RosPanel(QWidget):
         self._target_right_speed = 0.0
         self._launch_buttons_connected = False
         self._active_launch_variant: str | None = None
+        self._launch_stop_pending = False
         self._recording_session: RosCsvRecordingSession | None = None
         self._pending_snapshot: RosSnapshot | None = None
         self._topic_checkboxes: dict[str, QCheckBox] = {}
@@ -96,9 +101,14 @@ class RosPanel(QWidget):
         self._disconnect_btn = QPushButton("断开")
         self._disconnect_btn.clicked.connect(self.disconnect_requested.emit)
         connection_layout.addWidget(self._disconnect_btn)
+        self._restart_bridge_btn = QPushButton("重启 ROSbridge")
+        self._restart_bridge_btn.clicked.connect(self._on_restart_bridge)
+        connection_layout.addWidget(self._restart_bridge_btn)
 
         self._status_label = QLabel("未连接")
         connection_layout.addWidget(self._status_label)
+        self._bridge_health_label = QLabel("ROSbridge: 未连接")
+        connection_layout.addWidget(self._bridge_health_label)
         connection_layout.addStretch()
         layout.addWidget(connection_group)
         layout.addWidget(self._build_data_topic_group())
@@ -225,6 +235,13 @@ class RosPanel(QWidget):
         group = QGroupBox("ROS 数据 topic 订阅")
         layout = QVBoxLayout(group)
 
+        fastlio_row = QHBoxLayout()
+        fastlio_row.addWidget(QLabel("FAST-LIO 里程计 topic:"))
+        self._fastlio_topic_edit = QLineEdit(DEFAULT_FASTLIO_ODOM_TOPIC)
+        self._fastlio_topic_edit.editingFinished.connect(self._on_fastlio_topic_edited)
+        fastlio_row.addWidget(self._fastlio_topic_edit, stretch=1)
+        layout.addLayout(fastlio_row)
+
         grid = QGridLayout()
         for index, option in enumerate(ROSBRIDGE_DATA_TOPIC_OPTIONS):
             topic = str(option["topic"])
@@ -317,9 +334,32 @@ class RosPanel(QWidget):
         self._launch_buttons_connected = connected
         if not connected:
             self._active_launch_variant = None
+            self._launch_stop_pending = False
         self._update_launch_button_guard()
         self._status_label.setText("已连接" if connected else "未连接")
         self._status_label.setStyleSheet("color: green;" if connected else "color: red;")
+
+    def set_rosbridge_health(self, health: RosbridgeHealth) -> None:
+        state_text = {
+            "disconnected": "未连接",
+            "connecting": "连接中",
+            "online": "在线",
+            "data_silent": "数据静默",
+            "abnormal": "异常",
+            "restarting": "重启中",
+        }.get(health.state, health.state)
+        latency = "---" if health.latency_ms is None else f"{health.latency_ms:.1f} ms"
+        self._bridge_health_label.setText(
+            f"ROSbridge: {state_text} / 延迟 {latency} / 连续失败 {health.consecutive_failures}"
+        )
+        color = {
+            "online": "green",
+            "restarting": "#1565c0",
+            "connecting": "#b26a00",
+            "data_silent": "#b26a00",
+        }.get(health.state, "red")
+        self._bridge_health_label.setStyleSheet(f"color: {color};")
+        self._restart_bridge_btn.setEnabled(health.state != "restarting")
 
     def update_snapshot(self, snapshot: RosSnapshot) -> None:
         time_s = self._buffer.append(snapshot)
@@ -368,6 +408,30 @@ class RosPanel(QWidget):
             return
         self.connect_requested.emit(host, self._port_spin.value(), self.selected_data_topics())
 
+    def _on_restart_bridge(self) -> None:
+        host = self._host_edit.text().strip()
+        if not host:
+            self._bridge_health_label.setText("请输入 ROS 主机")
+            return
+        self.restart_requested.emit(host, self._port_spin.value())
+
+    def _on_fastlio_topic_edited(self) -> None:
+        topic = self.fastlio_odometry_topic()
+        self.set_fastlio_odometry_topic(topic)
+        self.fastlio_topic_changed.emit(topic)
+
+    def fastlio_odometry_topic(self) -> str:
+        return normalize_ros_topic(
+            self._fastlio_topic_edit.text(),
+            DEFAULT_FASTLIO_ODOM_TOPIC,
+        )
+
+    def set_fastlio_odometry_topic(self, topic: str) -> None:
+        normalized = normalize_ros_topic(topic, DEFAULT_FASTLIO_ODOM_TOPIC)
+        blocker = QSignalBlocker(self._fastlio_topic_edit)
+        self._fastlio_topic_edit.setText(normalized)
+        del blocker
+
     def selected_data_topics(self) -> list[str]:
         return [topic for topic, checkbox in self._topic_checkboxes.items() if checkbox.isChecked()]
 
@@ -404,27 +468,33 @@ class RosPanel(QWidget):
 
     def _on_pid_launch_start(self) -> None:
         self._active_launch_variant = "pid"
+        self._launch_stop_pending = False
         self._update_launch_button_guard()
         self.launch_manager_command_requested.emit(PID_LAUNCH_COMMAND)
         self.set_pid_launch_status("PID 节点启动命令已发送")
+        self.status_query_requested.emit()
 
     def _on_pid_launch_stop(self) -> None:
-        self._active_launch_variant = None
+        self._launch_stop_pending = True
         self._update_launch_button_guard()
         self.launch_manager_command_requested.emit(PID_LAUNCH_STOP_COMMAND)
         self.set_pid_launch_status("PID 节点停止命令已发送")
+        self.status_query_requested.emit()
 
     def _on_radar_calibration_launch_start(self) -> None:
         self._active_launch_variant = "radar_calibration"
+        self._launch_stop_pending = False
         self._update_launch_button_guard()
         self.launch_manager_command_requested.emit(RADAR_CALIBRATION_LAUNCH_COMMAND)
         self.set_pid_launch_status("雷达直线校准节点启动命令已发送")
+        self.status_query_requested.emit()
 
     def _on_radar_calibration_launch_stop(self) -> None:
-        self._active_launch_variant = None
+        self._launch_stop_pending = True
         self._update_launch_button_guard()
         self.launch_manager_command_requested.emit(PID_LAUNCH_STOP_COMMAND)
         self.set_pid_launch_status("雷达直线校准节点停止命令已发送")
+        self.status_query_requested.emit()
 
     def _update_launch_button_guard(self) -> None:
         connected = self._launch_buttons_connected
@@ -434,16 +504,58 @@ class RosPanel(QWidget):
             self._radar_calibration_launch_start_btn.setEnabled(False)
             self._radar_calibration_launch_stop_btn.setEnabled(False)
             return
-        self._pid_launch_start_btn.setEnabled(self._active_launch_variant in (None, "pid"))
-        self._radar_calibration_launch_start_btn.setEnabled(
-            self._active_launch_variant in (None, "radar_calibration")
-        )
-        self._pid_launch_stop_btn.setEnabled(True)
-        self._radar_calibration_launch_stop_btn.setEnabled(True)
+        if self._launch_stop_pending:
+            self._pid_launch_start_btn.setEnabled(False)
+            self._pid_launch_stop_btn.setEnabled(False)
+            self._radar_calibration_launch_start_btn.setEnabled(False)
+            self._radar_calibration_launch_stop_btn.setEnabled(False)
+            return
+        if self._active_launch_variant is None:
+            self._pid_launch_start_btn.setEnabled(True)
+            self._pid_launch_stop_btn.setEnabled(False)
+            self._radar_calibration_launch_start_btn.setEnabled(True)
+            self._radar_calibration_launch_stop_btn.setEnabled(False)
+            return
+        self._pid_launch_start_btn.setEnabled(False)
+        self._pid_launch_stop_btn.setEnabled(self._active_launch_variant == "pid")
+        self._radar_calibration_launch_start_btn.setEnabled(False)
+        self._radar_calibration_launch_stop_btn.setEnabled(self._active_launch_variant == "radar_calibration")
 
     def set_pid_launch_status(self, text: str, *, error: bool = False) -> None:
         self._pid_launch_status_label.setText(text)
         self._pid_launch_status_label.setStyleSheet("color: red;" if error else "color: green;")
+
+    def update_launch_manager_status(self, status: dict[str, object]) -> None:
+        data = status.get("data") if isinstance(status.get("data"), dict) else status
+        running = set(data.get("running", []) or []) if isinstance(data, dict) else set()
+        detail = data.get("detail", {}) if isinstance(data, dict) else {}
+        detail = detail if isinstance(detail, dict) else {}
+        if "pid_control" not in running:
+            self._active_launch_variant = None
+            self._launch_stop_pending = False
+            self._update_launch_button_guard()
+            self.set_pid_launch_status("PID / 雷达直线校准节点未运行")
+            return
+
+        pid_detail = detail.get("pid_control", {})
+        detail_text = self._launch_detail_text(pid_detail)
+        if "pid_control_lidar_assisted.launch" in detail_text:
+            self._active_launch_variant = "radar_calibration"
+            label = "雷达直线校准节点运行中"
+        else:
+            self._active_launch_variant = "pid"
+            label = "PID 节点运行中"
+        self._launch_stop_pending = False
+        self._update_launch_button_guard()
+        suffix = f": {detail_text}" if detail_text else ""
+        self.set_pid_launch_status(f"{label}{suffix}")
+
+    @staticmethod
+    def _launch_detail_text(detail: object) -> str:
+        if isinstance(detail, dict):
+            parts = [str(detail.get(key, "")).strip() for key in ("package", "launch", "command")]
+            return " ".join(part for part in parts if part)
+        return str(detail or "").strip()
 
     def _set_target_speed_labels(self, left: float, right: float) -> None:
         self._target_left_speed = left

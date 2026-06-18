@@ -95,6 +95,113 @@ class LocalizationPanelTests(unittest.TestCase):
         self.assertEqual(fetcher.config.port, 19090)
         self.assertEqual(fetcher.config.map_topic, "/Laser_map")
 
+    def test_fastlio_topic_edit_emits_normalized_topic(self) -> None:
+        panel = LocalizationPanel()
+        topics: list[str] = []
+        panel.fastlio_topic_changed.connect(topics.append)
+        panel._topic_edit.setText("Odometry2")
+
+        panel._topic_edit.editingFinished.emit()
+
+        self.assertEqual(panel.fastlio_odometry_topic(), "/Odometry2")
+        self.assertEqual(topics, ["/Odometry2"])
+
+    def test_shared_localization_sample_updates_buffer(self) -> None:
+        panel = LocalizationPanel()
+
+        panel.accept_localization_sample(make_sample(2.0, 0.1))
+
+        self.assertAlmostEqual(panel._buffer.latest().x, 2.0)
+        self.assertIn("在线", panel._online_label.text())
+
+    def test_calibration_launch_uses_current_fastlio_topic(self) -> None:
+        panel = LocalizationPanel()
+        commands: list[str] = []
+        panel.launch_manager_command_requested.connect(commands.append)
+        panel.set_fastlio_odometry_topic("/fastlio/odom")
+        panel.set_shared_ros_connected(True)
+
+        panel._calibration_launch_start_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "restart pid_control simple_follower pid_control_lidar_assisted.launch "
+                "imu_topic:=/active_imu lidar_odom_topic:=/fastlio/odom"
+            ],
+        )
+        self.assertFalse(panel._calibration_launch_start_btn.isEnabled())
+        self.assertFalse(panel._calibration_launch_stop_btn.isEnabled())
+
+    def test_calibration_motion_requires_confirmed_running_status(self) -> None:
+        panel = LocalizationPanel()
+        controls: list[tuple[float, bool, bool]] = []
+        panel.line_follow_control_requested.connect(
+            lambda speed, forward, backward: controls.append((speed, forward, backward))
+        )
+        panel.set_shared_ros_connected(True)
+
+        panel._calibration_forward_btn.click()
+
+        self.assertEqual(controls, [])
+        self.assertFalse(panel._calibration_forward_btn.isEnabled())
+
+    def test_calibration_forward_backward_stop_emit_line_follow_controls(self) -> None:
+        panel = LocalizationPanel()
+        controls: list[tuple[float, bool, bool]] = []
+        panel.line_follow_control_requested.connect(
+            lambda speed, forward, backward: controls.append((speed, forward, backward))
+        )
+        panel.set_shared_ros_connected(True)
+        panel.update_launch_manager_status(
+            {
+                "running": ["pid_control"],
+                "detail": {
+                    "pid_control": {
+                        "package": "simple_follower",
+                        "launch": "pid_control_lidar_assisted.launch",
+                    }
+                },
+            }
+        )
+        panel._calibration_speed_spin.setValue(0.3)
+
+        panel._calibration_forward_btn.click()
+        panel._calibration_backward_btn.click()
+        panel._calibration_stop_btn.click()
+
+        self.assertEqual(
+            controls,
+            [
+                (0.3, True, False),
+                (0.3, False, True),
+                (0.0, False, False),
+            ],
+        )
+
+    def test_shutdown_stops_active_calibration_motion(self) -> None:
+        panel = LocalizationPanel()
+        controls: list[tuple[float, bool, bool]] = []
+        panel.line_follow_control_requested.connect(
+            lambda speed, forward, backward: controls.append((speed, forward, backward))
+        )
+        panel.set_shared_ros_connected(True)
+        panel.update_launch_manager_status(
+            {
+                "running": ["pid_control"],
+                "detail": {
+                    "pid_control": {
+                        "launch": "pid_control_lidar_assisted.launch",
+                    }
+                },
+            }
+        )
+        panel._calibration_forward_btn.click()
+
+        panel.shutdown()
+
+        self.assertEqual(controls[-1], (0.0, False, False))
+
     def test_trajectory_plot_keeps_equal_xy_scale_for_map_overlay(self) -> None:
         panel = LocalizationPanel()
 
@@ -119,6 +226,55 @@ class LocalizationPanelTests(unittest.TestCase):
             ],
         )
         self.assertIn("雷达", panel._lidar_launch_label.text())
+
+    def test_launch_buttons_request_status_after_commands(self) -> None:
+        panel = LocalizationPanel()
+        queries: list[str] = []
+        panel.status_query_requested.connect(lambda: queries.append("query"))
+        panel._set_connected(True)
+
+        panel._fastlio_launch_start_btn.click()
+        panel._fastlio_launch_stop_btn.click()
+        panel._lidar_launch_start_btn.click()
+        panel._lidar_launch_stop_btn.click()
+
+        self.assertEqual(queries, ["query", "query", "query", "query"])
+
+    def test_launch_manager_status_updates_fastlio_and_lidar_buttons(self) -> None:
+        panel = LocalizationPanel()
+        panel._set_connected(True)
+
+        panel.update_launch_manager_status(
+            {
+                "running": ["fastlio", "lidar"],
+                "detail": {
+                    "fastlio": {"package": "fast_lio", "launch": "mapping_c16.launch"},
+                    "lidar": {"package": "turn_on_wheeltec_robot", "launch": "wheeltec_lidar.launch"},
+                },
+            }
+        )
+
+        self.assertFalse(panel._fastlio_launch_start_btn.isEnabled())
+        self.assertTrue(panel._fastlio_launch_stop_btn.isEnabled())
+        self.assertFalse(panel._lidar_launch_start_btn.isEnabled())
+        self.assertTrue(panel._lidar_launch_stop_btn.isEnabled())
+        self.assertIn("运行中", panel._fastlio_launch_label.text())
+        self.assertIn("mapping_c16.launch", panel._fastlio_launch_label.text())
+        self.assertIn("运行中", panel._lidar_launch_label.text())
+        self.assertIn("wheeltec_lidar.launch", panel._lidar_launch_label.text())
+
+        panel.update_launch_manager_status(
+            {
+                "running": ["lidar"],
+                "detail": {"lidar": {"package": "turn_on_wheeltec_robot", "launch": "wheeltec_lidar.launch"}},
+            }
+        )
+
+        self.assertTrue(panel._fastlio_launch_start_btn.isEnabled())
+        self.assertFalse(panel._fastlio_launch_stop_btn.isEnabled())
+        self.assertFalse(panel._lidar_launch_start_btn.isEnabled())
+        self.assertTrue(panel._lidar_launch_stop_btn.isEnabled())
+        self.assertIn("未运行", panel._fastlio_launch_label.text())
 
     def test_freeze_failure_does_not_toggle_button_or_fetch_map(self) -> None:
         fetcher = FakeMapFetchClient()

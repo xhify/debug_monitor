@@ -697,8 +697,8 @@ def _open_unified_rosbridge_for_localization(window: Any) -> None:
         topics.extend(window._ros_panel.selected_data_topics())
     topic_edit = getattr(getattr(window, "_localization_panel", None), "_topic_edit", None)
     odometry_topic = topic_edit.text().strip() if topic_edit is not None else ""
-    if odometry_topic and odometry_topic not in topics:
-        topics.append(odometry_topic)
+    if odometry_topic:
+        window._ros_worker.update_fastlio_odometry_topic(odometry_topic)
     window._ros_worker.open_bridge(host, port, topics)
     _update_rosbridge_status(window, connected=getattr(window, "_ros_connected", False))
 
@@ -806,6 +806,8 @@ def _update_topic_rate_label_for_event(window: Any, event: Any) -> None:
 
 def _update_localization_from_ros_message(window: Any, event: Any) -> None:
     if not isinstance(event, dict):
+        return
+    if event.get("localization_sample_emitted"):
         return
     if event.get("topic") != window._summary_trajectory_topic():
         return

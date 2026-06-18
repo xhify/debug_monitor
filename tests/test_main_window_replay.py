@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from imu_protocol import ImuSample
+from localization_buffer import LocalizationSample
 from main_window import MainWindow
 from protocol import DataFrame
 from ros_bridge_worker import RosImuReading, RosSnapshot
@@ -367,6 +368,116 @@ class MainWindowReplayTests(unittest.TestCase):
             ],
         )
 
+    def test_launch_buttons_request_launch_manager_status_after_commands(self) -> None:
+        window = MainWindow()
+        commands: list[str] = []
+        queries: list[str] = []
+        window._ros_worker.publish_launch_manager_command = commands.append
+        window._localization_panel._worker.publish_launch_manager_command = commands.append
+        window._ros_worker.request_launch_manager_status = lambda: queries.append("query")
+        window._ros_panel.set_connected(True)
+        window._localization_panel._set_connected(True)
+
+        window._ros_panel._pid_launch_start_btn.click()
+        window._localization_panel._fastlio_launch_start_btn.click()
+
+        self.assertEqual(
+            commands,
+            [
+                "start pid_control simple_follower pid_control.launch",
+                "start fastlio fast_lio mapping_c16.launch",
+            ],
+        )
+        self.assertEqual(queries, ["query", "query"])
+
+    def test_fastlio_topic_changes_sync_both_pages_and_worker(self) -> None:
+        window = MainWindow()
+        updates: list[str] = []
+        window._ros_worker.update_fastlio_odometry_topic = updates.append
+
+        window._ros_panel._fastlio_topic_edit.setText("/fastlio/custom")
+        window._ros_panel._fastlio_topic_edit.editingFinished.emit()
+
+        self.assertEqual(
+            window._localization_panel.fastlio_odometry_topic(),
+            "/fastlio/custom",
+        )
+        self.assertEqual(updates, ["/fastlio/custom"])
+
+    def test_shared_worker_localization_sample_reaches_localization_panel(self) -> None:
+        window = MainWindow()
+        sample = LocalizationSample(
+            ros_time=1.0,
+            recv_time=2.0,
+            source="/Odometry",
+            frame_id="camera_init",
+            child_frame_id="body",
+            x=3.0,
+            y=0.2,
+            z=0.0,
+            qx=0.0,
+            qy=0.0,
+            qz=0.0,
+            qw=1.0,
+            roll=0.0,
+            pitch=0.0,
+            yaw=0.0,
+        )
+
+        window._ros_worker.localization_sample_received.emit(sample)
+
+        self.assertAlmostEqual(window._localization_panel._buffer.latest().x, 3.0)
+
+    def test_restart_finished_restores_connection_and_subscriptions(self) -> None:
+        window = MainWindow()
+        calls: list[tuple] = []
+        window._rosbridge_restore_topics = ["/imu"]
+        window._rosbridge_restore_fastlio_topic = "/fastlio/odom"
+        window._ros_worker.update_fastlio_odometry_topic = (
+            lambda topic: calls.append(("topic", topic))
+        )
+        window._ros_worker.open_bridge = (
+            lambda host, port, topics=None: calls.append(
+                ("open", host, port, list(topics or []))
+            )
+        )
+
+        window._on_rosbridge_restart_finished(
+            {"ok": True, "host": "192.168.0.14", "port": 9090}
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                ("topic", "/fastlio/odom"),
+                ("open", "192.168.0.14", 9090, ["/imu"]),
+            ],
+        )
+
+    def test_connected_rosbridge_queries_launch_status_every_two_status_ticks(self) -> None:
+        window = MainWindow()
+        queries: list[str] = []
+        window._ros_connected = True
+        window._ros_worker._session = object()
+        window._ros_worker.request_launch_manager_status = lambda: queries.append("query")
+
+        window._update_status()
+        window._update_status()
+
+        self.assertEqual(queries, ["query"])
+
+    def test_restart_state_clears_only_after_rosbridge_reconnects(self) -> None:
+        window = MainWindow()
+        restarting: list[bool] = []
+        window._ros_worker._restarting = True
+        window._ros_worker.set_restarting = restarting.append
+        window._ros_worker._session = object()
+        window._ros_worker.request_launch_manager_status = lambda: None
+
+        window._on_ros_connection_changed(True)
+
+        self.assertEqual(restarting, [False])
+
     def test_localization_panel_fastlio_launch_buttons_publish_launch_manager_commands(self) -> None:
         window = MainWindow()
         commands: list[str] = []
@@ -383,6 +494,35 @@ class MainWindowReplayTests(unittest.TestCase):
                 "stop fastlio",
             ],
         )
+
+    def test_launch_manager_status_updates_ros_and_localization_node_labels(self) -> None:
+        window = MainWindow()
+        window._ros_panel.set_connected(True)
+        window._localization_panel._set_connected(True)
+
+        window._on_launch_manager_status(
+            {
+                "data": {
+                    "running": ["pid_control", "fastlio", "lidar"],
+                    "detail": {
+                        "pid_control": {"package": "simple_follower", "launch": "pid_control.launch"},
+                        "fastlio": {"package": "fast_lio", "launch": "mapping_c16.launch"},
+                        "lidar": {"package": "turn_on_wheeltec_robot", "launch": "wheeltec_lidar.launch"},
+                    },
+                }
+            }
+        )
+
+        self.assertIn("PID", window._ros_panel._pid_launch_status_label.text())
+        self.assertIn("运行中", window._ros_panel._pid_launch_status_label.text())
+        self.assertIn("运行中", window._localization_panel._fastlio_launch_label.text())
+        self.assertIn("运行中", window._localization_panel._lidar_launch_label.text())
+
+        window._on_launch_manager_status({"data": {"running": [], "detail": {}}})
+
+        self.assertIn("未运行", window._ros_panel._pid_launch_status_label.text())
+        self.assertIn("未运行", window._localization_panel._fastlio_launch_label.text())
+        self.assertIn("未运行", window._localization_panel._lidar_launch_label.text())
 
     def test_summary_recording_writes_encoder_and_imu_files_to_one_directory(self) -> None:
         window = MainWindow()

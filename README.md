@@ -80,6 +80,10 @@ python src/main.py
 
 FAST-LIO 定位面板的启动/停止节点、冻结/恢复建图、冻结地图快照均通过 ROSbridge 工作，不再需要 SSH 到固定主机或固定 IP。ROS 主机需要启动 `rosbridge_server`，并启动 `rosapi`，以便客户端可以设置 `/mapping/map_update_enable` 并订阅 `/Laser_map`。
 
+ROS 页面提供“一键重启 ROSbridge”。该操作使用 `wheeltec@<当前 ROS 主机>` 的免密 SSH，仅停止并重新启动 `/rosbridge_websocket`，不会重启底盘、IMU 或整套 `turn_on_wheeltec_robot.launch`。端口恢复后，上位机会自动重连并恢复普通数据 topic 与 FAST-LIO 里程计 topic。界面每秒综合显示 WebSocket、`/rosapi/get_time`、网络延迟、连续探测失败和订阅数据静默状态。
+
+ROS 页面与定位精度页面的 FAST-LIO 里程计 topic 双向同步，在线修改会立即切换共享 ROSbridge 订阅。定位精度页面的“雷达直线校准”区域可启动/停止 `pid_control_lidar_assisted.launch`，并通过 `/line_follow_control` 发送前进、后退和停止命令；只有 launch manager 确认校准节点正在运行后，运动按钮才会启用。
+
 汇总记录中的 ROS CSV 会保留本地相对 `time_s`，同时追加保存各 topic 的 `header.stamp` 为 `ros_time`，可用于和 FAST-LIO `/Odometry` 轨迹按 ROS 时间戳对齐。
 
 可通过环境变量覆盖无输入框场景下的默认 ROSbridge 配置：
@@ -90,6 +94,12 @@ DEBUG_MONITOR_ROSBRIDGE_PORT=9090
 DEBUG_MONITOR_FASTLIO_ODOM_TOPIC=/Odometry
 DEBUG_MONITOR_MAP_TOPIC=/Laser_map
 DEBUG_MONITOR_MAP_UPDATE_PARAM=/mapping/map_update_enable
+DEBUG_MONITOR_ROS_SSH_USER=wheeltec
+DEBUG_MONITOR_SSH_EXECUTABLE=ssh
+DEBUG_MONITOR_ROSBRIDGE_RESTART_TIMEOUT_S=15
+DEBUG_MONITOR_ROSBRIDGE_RESTART_PROBE_INTERVAL_S=0.25
+DEBUG_MONITOR_ROSBRIDGE_HEALTH_FAILURE_THRESHOLD=3
+DEBUG_MONITOR_ROSBRIDGE_DATA_SILENCE_S=3
 ```
 
 ## 3. 硬件连接

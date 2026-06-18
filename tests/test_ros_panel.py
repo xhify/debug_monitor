@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from ros_bridge_worker import RosSnapshot
+from ros_bridge_worker import RosSnapshot, RosbridgeHealth
 from widgets.ros_panel import RosPanel
 
 
@@ -37,6 +37,45 @@ class RosPanelTests(unittest.TestCase):
         panel._connect_btn.click()
 
         self.assertEqual(requests, [("192.168.0.14", 9090, ["/odom", "/imu"])])
+
+    def test_restart_button_emits_current_host_and_port(self) -> None:
+        panel = RosPanel()
+        requests: list[tuple[str, int]] = []
+        panel.restart_requested.connect(lambda host, port: requests.append((host, port)))
+        panel._host_edit.setText("192.168.0.14")
+        panel._port_spin.setValue(9090)
+
+        panel._restart_bridge_btn.click()
+
+        self.assertEqual(requests, [("192.168.0.14", 9090)])
+
+    def test_fastlio_topic_edit_normalizes_and_emits(self) -> None:
+        panel = RosPanel()
+        topics: list[str] = []
+        panel.fastlio_topic_changed.connect(topics.append)
+        panel._fastlio_topic_edit.setText("custom_odom")
+
+        panel._fastlio_topic_edit.editingFinished.emit()
+
+        self.assertEqual(panel.fastlio_odometry_topic(), "/custom_odom")
+        self.assertEqual(topics, ["/custom_odom"])
+
+    def test_health_state_updates_label_and_restart_button(self) -> None:
+        panel = RosPanel()
+
+        panel.set_rosbridge_health(
+            RosbridgeHealth(
+                state="restarting",
+                connected=False,
+                latency_ms=None,
+                consecutive_failures=0,
+                last_message_age_s=None,
+                detail="正在重启并恢复连接",
+            )
+        )
+
+        self.assertFalse(panel._restart_bridge_btn.isEnabled())
+        self.assertIn("重启中", panel._bridge_health_label.text())
 
     def test_data_topic_checkboxes_default_to_unchecked(self) -> None:
         panel = RosPanel()
@@ -141,18 +180,87 @@ class RosPanelTests(unittest.TestCase):
 
         panel._pid_launch_start_btn.click()
 
-        self.assertTrue(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._pid_launch_start_btn.isEnabled())
+        self.assertTrue(panel._pid_launch_stop_btn.isEnabled())
         self.assertFalse(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_stop_btn.isEnabled())
 
         panel._pid_launch_stop_btn.click()
 
+        self.assertFalse(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._pid_launch_stop_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_stop_btn.isEnabled())
+
+        panel.update_launch_manager_status({"running": [], "detail": {}})
+
         self.assertTrue(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._pid_launch_stop_btn.isEnabled())
         self.assertTrue(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_stop_btn.isEnabled())
 
         panel._radar_calibration_launch_start_btn.click()
 
         self.assertFalse(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._pid_launch_stop_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertTrue(panel._radar_calibration_launch_stop_btn.isEnabled())
+
+    def test_launch_manager_status_updates_pid_variant_buttons_and_label(self) -> None:
+        panel = RosPanel()
+        panel.set_connected(True)
+
+        panel.update_launch_manager_status(
+            {
+                "running": ["pid_control"],
+                "detail": {"pid_control": {"package": "simple_follower", "launch": "pid_control.launch"}},
+            }
+        )
+
+        self.assertFalse(panel._pid_launch_start_btn.isEnabled())
+        self.assertTrue(panel._pid_launch_stop_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_stop_btn.isEnabled())
+        self.assertIn("PID", panel._pid_launch_status_label.text())
+        self.assertIn("运行中", panel._pid_launch_status_label.text())
+
+        panel.update_launch_manager_status(
+            {
+                "running": ["pid_control"],
+                "detail": {
+                    "pid_control": {
+                        "package": "simple_follower",
+                        "launch": "pid_control_lidar_assisted.launch",
+                    }
+                },
+            }
+        )
+
+        self.assertFalse(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._pid_launch_stop_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertTrue(panel._radar_calibration_launch_stop_btn.isEnabled())
+        self.assertIn("雷达直线校准", panel._pid_launch_status_label.text())
+        self.assertIn("运行中", panel._pid_launch_status_label.text())
+
+        panel.update_launch_manager_status({"running": [], "detail": {}})
+
+        self.assertTrue(panel._pid_launch_start_btn.isEnabled())
+        self.assertFalse(panel._pid_launch_stop_btn.isEnabled())
         self.assertTrue(panel._radar_calibration_launch_start_btn.isEnabled())
+        self.assertFalse(panel._radar_calibration_launch_stop_btn.isEnabled())
+        self.assertIn("未运行", panel._pid_launch_status_label.text())
+
+    def test_launch_buttons_request_status_after_commands(self) -> None:
+        panel = RosPanel()
+        queries: list[str] = []
+        panel.status_query_requested.connect(lambda: queries.append("query"))
+        panel.set_connected(True)
+
+        panel._pid_launch_start_btn.click()
+        panel._pid_launch_stop_btn.click()
+
+        self.assertEqual(queries, ["query", "query"])
 
     def test_disconnected_state_disables_all_launch_buttons(self) -> None:
         panel = RosPanel()

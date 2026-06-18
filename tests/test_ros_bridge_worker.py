@@ -6,7 +6,7 @@ from math import cos, pi, sin
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from ros_bridge_worker import RosBridgeSession
+from ros_bridge_worker import RosBridgeSession, RosBridgeWorker, evaluate_rosbridge_health
 
 
 class FakeRos:
@@ -117,6 +117,88 @@ class RosBridgeSessionTests(unittest.TestCase):
         subscribed_names = [topic.name for topic in FakeTopic.created if topic.callback is not None]
         self.assertEqual(subscribed_names, ["/launch_manager/status", "/odom", "/imu"])
         self.assertNotIn("/active_imu", subscribed_names)
+
+    def test_dynamic_fastlio_topic_emits_localization_sample(self) -> None:
+        samples = []
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            fastlio_odometry_topic="/custom_odom",
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+            on_localization_sample=samples.append,
+        )
+        session.connect()
+
+        session.topic("/custom_odom").callback(
+            {
+                "header": {"stamp": {"secs": 10, "nsecs": 0}, "frame_id": "camera_init"},
+                "child_frame_id": "body",
+                "pose": {
+                    "pose": {
+                        "position": {"x": 1.25, "y": -0.5, "z": 0.1},
+                        "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].source, "/custom_odom")
+        self.assertAlmostEqual(samples[0].x, 1.25)
+        self.assertAlmostEqual(samples[0].y, -0.5)
+
+    def test_replacing_fastlio_topic_unsubscribes_old_dynamic_topic(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            fastlio_odometry_topic="/Odometry",
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+        old_topic = session.topic("/Odometry")
+
+        session.update_fastlio_odometry_topic("/fastlio/odom")
+
+        self.assertTrue(old_topic.unsubscribed)
+        self.assertEqual(session.topic("/fastlio/odom").message_type, "nav_msgs/Odometry")
+
+    def test_fastlio_topic_shared_with_data_subscription_is_not_duplicated(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            enabled_data_topics=["/Odometry"],
+            fastlio_odometry_topic="/Odometry",
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+
+        session.connect()
+
+        odometry_topics = [topic for topic in FakeTopic.created if topic.name == "/Odometry"]
+        self.assertEqual(len(odometry_topics), 1)
+
+    def test_enabling_current_fastlio_as_data_subscription_reuses_one_topic(self) -> None:
+        session = RosBridgeSession(
+            host="192.168.0.14",
+            port=9090,
+            fastlio_odometry_topic="/Odometry",
+            ros_factory=FakeRos,
+            topic_factory=FakeTopic,
+        )
+        session.connect()
+        dynamic_topic = session.topic("/Odometry")
+
+        session.update_data_subscriptions(["/Odometry"])
+
+        self.assertTrue(dynamic_topic.unsubscribed)
+        active_topics = [
+            topic
+            for topic in FakeTopic.created
+            if topic.name == "/Odometry" and not topic.unsubscribed
+        ]
+        self.assertEqual(len(active_topics), 1)
 
     def test_update_data_subscriptions_subscribes_and_unsubscribes_without_touching_core(self) -> None:
         session = RosBridgeSession(
@@ -545,6 +627,68 @@ class RosBridgeSessionTests(unittest.TestCase):
         )
         self.assertEqual(commands[6], {"action": "query_status"})
         self.assertFalse(any(command.get("session_id") == "session_2" for command in commands))
+
+
+class RosbridgeHealthTests(unittest.TestCase):
+    def test_launch_manager_status_does_not_reset_data_silence_clock(self) -> None:
+        worker = RosBridgeWorker()
+        events = []
+        worker.message_received.connect(events.append)
+
+        worker._on_session_message({"topic": "/launch_manager/status"})
+
+        self.assertIsNone(worker._last_message_monotonic)
+        self.assertEqual(events, [{"topic": "/launch_manager/status"}])
+
+        worker._on_session_message({"topic": "/imu"})
+
+        self.assertIsNotNone(worker._last_message_monotonic)
+
+    def test_single_probe_failure_keeps_bridge_connecting_before_threshold(self) -> None:
+        health = evaluate_rosbridge_health(
+            connected=True,
+            restarting=False,
+            probe_ok=False,
+            consecutive_failures=1,
+            failure_threshold=3,
+            selected_topic_count=1,
+            last_message_age_s=0.2,
+            data_silence_s=3.0,
+            latency_ms=None,
+        )
+
+        self.assertEqual(health.state, "connecting")
+
+    def test_consecutive_probe_failures_mark_bridge_abnormal(self) -> None:
+        health = evaluate_rosbridge_health(
+            connected=True,
+            restarting=False,
+            probe_ok=False,
+            consecutive_failures=3,
+            failure_threshold=3,
+            selected_topic_count=1,
+            last_message_age_s=0.2,
+            data_silence_s=3.0,
+            latency_ms=None,
+        )
+
+        self.assertEqual(health.state, "abnormal")
+
+    def test_healthy_bridge_without_recent_selected_topic_data_is_silent(self) -> None:
+        health = evaluate_rosbridge_health(
+            connected=True,
+            restarting=False,
+            probe_ok=True,
+            consecutive_failures=0,
+            failure_threshold=3,
+            selected_topic_count=2,
+            last_message_age_s=4.0,
+            data_silence_s=3.0,
+            latency_ms=12.5,
+        )
+
+        self.assertEqual(health.state, "data_silent")
+        self.assertTrue(health.connected)
 
 
 if __name__ == "__main__":
