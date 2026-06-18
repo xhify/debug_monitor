@@ -153,22 +153,42 @@ class RosbagPanelTests(unittest.TestCase):
         self.assertEqual(topics[-3:], ["/custom_a", "/custom_b", "/custom_c"])
         self.assertIn("9 个 topic", panel._topic_count_label.text())
 
-    def test_delete_guard_rejects_mismatched_confirm_and_active_session(self) -> None:
+    def test_delete_guard_rejects_active_sessions_and_allows_stopped_without_confirm_text(self) -> None:
         panel = RosbagPanel()
         deletes = []
         panel.delete_requested.connect(lambda session_id, confirm: deletes.append((session_id, confirm)))
-        session = RemoteRosbagSession(session_id="session_1", status="stopped")
-
-        self.assertFalse(panel.request_delete_for_test(session, confirm="wrong"))
-        self.assertEqual(deletes, [])
 
         active = RemoteRosbagSession(session_id="session_2", status="recording")
         panel.update_recording_status(RosbagRecordingStatus(active=True, session_id="session_2"))
-        self.assertFalse(panel.request_delete_for_test(active, confirm="session_2"))
+        self.assertFalse(panel.request_delete_for_test(active))
         self.assertEqual(deletes, [])
 
-        self.assertTrue(panel.request_delete_for_test(session, confirm="session_1"))
+        panel.update_recording_status(RosbagRecordingStatus(active=False, session_id=""))
+        recording = RemoteRosbagSession(session_id="session_3", status="recording")
+        self.assertFalse(panel.request_delete_for_test(recording))
+        self.assertEqual(deletes, [])
+
+        stopped = RemoteRosbagSession(session_id="session_1", status="stopped")
+        self.assertTrue(panel.request_delete_for_test(stopped))
         self.assertEqual(deletes, [("session_1", "session_1")])
+
+    def test_delete_confirmation_message_shows_session_details_and_risk(self) -> None:
+        panel = RosbagPanel()
+        session = RemoteRosbagSession(
+            session_id="session_1",
+            status="stopped",
+            remote_dir="/home/wheeltec/bags",
+            size_bytes=1024,
+        )
+
+        message = panel._delete_confirmation_message(session)
+
+        self.assertIn("session_id: session_1", message)
+        self.assertIn("状态: stopped", message)
+        self.assertIn("大小: 1.0 KB", message)
+        self.assertIn("远程目录: /home/wheeltec/bags", message)
+        self.assertIn("永久删除不可恢复", message)
+        self.assertIn("未同步的数据会丢失", message)
 
 
 if __name__ == "__main__":

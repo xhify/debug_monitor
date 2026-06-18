@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -240,8 +239,8 @@ class RosbagPanel(QWidget):
     def append_log(self, text: str) -> None:
         self._log_label.setText(text)
 
-    def request_delete_for_test(self, session: RemoteRosbagSession, confirm: str) -> bool:
-        return self._request_delete(session, confirm)
+    def request_delete_for_test(self, session: RemoteRosbagSession) -> bool:
+        return self._request_delete(session)
 
     def _topics(self) -> list[str]:
         mode = str(self._mode_combo.currentData() or "")
@@ -323,27 +322,40 @@ class RosbagPanel(QWidget):
         if QMessageBox.question(self, "移到车端回收站", f"将 {session.session_id} 移到车端回收站？") == QMessageBox.Yes:
             self.trash_requested.emit(session.session_id)
 
+    def _delete_confirmation_message(self, session: RemoteRosbagSession) -> str:
+        remote_dir = session.remote_dir or "---"
+        return (
+            "永久删除不可恢复，未同步的数据会丢失。\n\n"
+            f"session_id: {session.session_id}\n"
+            f"状态: {session.status}\n"
+            f"大小: {format_bytes(session.size_bytes)}\n"
+            f"远程目录: {remote_dir}\n\n"
+            "确认永久删除这个车端 rosbag session？"
+        )
+
     def _delete_selected(self) -> None:
         session = self._selected_session()
         if session is None:
             return
-        text, ok = QInputDialog.getText(
-            self,
-            "永久删除 rosbag",
-            f"永久删除不可恢复，未同步的数据会丢失。\n请输入完整 session_id 确认:\n{session.session_id}",
-        )
-        if ok and self._request_delete(session, text):
+        if (
+            QMessageBox.question(
+                self,
+                "永久删除 rosbag",
+                self._delete_confirmation_message(session),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            == QMessageBox.Yes
+            and self._request_delete(session)
+        ):
             self.append_log("已发送永久删除请求")
 
-    def _request_delete(self, session: RemoteRosbagSession, confirm: str) -> bool:
+    def _request_delete(self, session: RemoteRosbagSession) -> bool:
         if self._recording_status.active and self._recording_status.session_id == session.session_id:
             self.append_log("正在录制的 session 不允许删除")
             return False
         if session.status == "recording":
             self.append_log("正在录制的 session 不允许删除")
             return False
-        if confirm != session.session_id:
-            self.append_log("确认 session_id 不匹配")
-            return False
-        self.delete_requested.emit(session.session_id, confirm)
+        self.delete_requested.emit(session.session_id, session.session_id)
         return True
