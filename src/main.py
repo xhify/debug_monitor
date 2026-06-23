@@ -15,9 +15,6 @@ from main_window import MainWindow
 from runtime_ui_optimizations import apply_runtime_ui_optimizations
 
 
-apply_runtime_ui_optimizations(MainWindow)
-
-
 def resource_path(relative_path: str) -> Path:
     """返回源码运行或 PyInstaller 打包后的资源路径。"""
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -40,6 +37,7 @@ def main() -> None:
     if not icon.isNull():
         app.setWindowIcon(icon)
 
+    apply_runtime_ui_optimizations(MainWindow)
     window = MainWindow()
     if not icon.isNull():
         window.setWindowIcon(icon)

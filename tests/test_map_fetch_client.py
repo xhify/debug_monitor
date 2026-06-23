@@ -1,14 +1,19 @@
 import base64
 import csv
 import os
+import shutil
 import struct
 import sys
 import unittest
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from map_fetch_client import MapFetchClient, MapFetchConfig, pointcloud2_to_rows
+
+
+TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / ".test_tmp"
 
 
 class FakeRos:
@@ -50,12 +55,18 @@ class MapFetchClientTests(unittest.TestCase):
         FakeRos.instances = []
         FakeTopic.instances = []
         FakeTopic.message = make_pointcloud2_message([(1.0, 2.0, 3.0, 4.0), (5.5, 6.5, 7.5, 8.5)])
+        TEST_TMP_ROOT.mkdir(exist_ok=True)
+        self.tmp_root = TEST_TMP_ROOT / f"map_fetch_{uuid.uuid4().hex}"
+        self.tmp_root.mkdir()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp_root, ignore_errors=True)
 
     def test_map_topic_snapshot_uses_rosbridge_and_writes_pointcloud2_csv(self) -> None:
         def forbidden_runner(*args, **kwargs):
             raise AssertionError("ssh/scp runner must not be called")
 
-        cache_dir = Path("C:/tmp/debug_monitor_map_fetch_test")
+        cache_dir = self.tmp_root / "snapshot"
         client = MapFetchClient(
             MapFetchConfig(host="robot.local", port=19090, map_topic="/Laser_map", timeout=5.0),
             ros_factory=FakeRos,
@@ -90,7 +101,7 @@ class MapFetchClientTests(unittest.TestCase):
             calls.append(args)
             raise AssertionError("network must not be used")
 
-        cache_dir = Path("C:/tmp/debug_monitor_map_fetch_local")
+        cache_dir = self.tmp_root / "local"
         cache_dir.mkdir(parents=True, exist_ok=True)
         local_map = cache_dir / "frozen.csv"
         local_map.write_text("x,y,z,intensity\n1,2,3,4\n", encoding="utf-8")
