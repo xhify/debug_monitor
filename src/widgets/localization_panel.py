@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -41,11 +41,18 @@ from app_config import (
     DEFAULT_ROSBRIDGE_HOST,
     DEFAULT_ROSBRIDGE_PORT,
 )
-from ros_odometry_client import RosOdometryWorker
+from ros_bridge_worker import normalize_ros_topic
 
 
 class LocalizationPanel(QWidget):
     """Read-only FAST-LIO2 odometry monitor plus frozen map fusion export."""
+
+    status_query_requested = Signal()
+    fastlio_topic_changed = Signal(str)
+    fastlio_subscription_pending_changed = Signal(bool)
+    fastlio_subscription_apply_requested = Signal(bool)
+    launch_manager_command_requested = Signal(str)
+    line_follow_control_requested = Signal(float, bool, bool)
 
     def __init__(
         self,
@@ -56,10 +63,6 @@ class LocalizationPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._buffer = LocalizationBuffer(max_points=5000)
-        self._worker = RosOdometryWorker()
-        self._worker.sample_received.connect(self._on_sample)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.connection_changed.connect(self._on_connection_changed)
         self._labels: dict[str, QLabel] = {}
         self._recording_started = False
         self._mapping_update_client = mapping_update_client
@@ -71,6 +74,15 @@ class LocalizationPanel(QWidget):
         self._frozen_map_points: list[MapPoint] = []
         self._frozen_map_path: Path | None = None
         self._map_fetch_metadata: dict[str, object] = {}
+        self._launch_buttons_connected = False
+        self._fastlio_running = False
+        self._fastlio_stop_pending = False
+        self._lidar_running = False
+        self._lidar_stop_pending = False
+        self._calibration_running = False
+        self._calibration_motion_active = False
+        self._calibration_start_pending = False
+        self._calibration_stop_pending = False
         self._setup_ui()
         self._setup_timer()
         self._set_connected(False)
@@ -103,14 +115,27 @@ class LocalizationPanel(QWidget):
         row.addWidget(QLabel("topic:"))
         self._topic_edit = QLineEdit("/Odometry")
         self._topic_edit.setMinimumWidth(120)
+        self._topic_edit.editingFinished.connect(self._on_fastlio_topic_edited)
         row.addWidget(self._topic_edit)
-        self._connect_btn = QPushButton("连接")
-        self._connect_btn.clicked.connect(self._connect)
+        self._fastlio_subscription_cb = QCheckBox("FAST-LIO 里程计")
+        self._fastlio_subscription_cb.toggled.connect(
+            self.fastlio_subscription_pending_changed.emit
+        )
+        row.addWidget(self._fastlio_subscription_cb)
+        self._apply_fastlio_subscription_btn = QPushButton("应用订阅")
+        self._apply_fastlio_subscription_btn.clicked.connect(
+            self._on_apply_fastlio_subscription
+        )
+        row.addWidget(self._apply_fastlio_subscription_btn)
+        self._connect_btn = QPushButton("请在 ROS 页连接")
+        self._connect_btn.setEnabled(False)
+        self._connect_btn.setToolTip("定位页使用 ROS 页的共享 ROSbridge 连接")
         row.addWidget(self._connect_btn)
         self._disconnect_btn = QPushButton("断开")
-        self._disconnect_btn.clicked.connect(self._worker.close_bridge)
+        self._disconnect_btn.setEnabled(False)
+        self._disconnect_btn.setToolTip("请在 ROS 页断开共享 ROSbridge 连接")
         row.addWidget(self._disconnect_btn)
-        self._connection_label = QLabel("未连接")
+        self._connection_label = QLabel("请在 ROS 页面连接共享 ROSbridge")
         row.addWidget(self._connection_label)
         self._online_label = QLabel("/Odometry: ---")
         row.addWidget(self._online_label)
@@ -289,37 +314,41 @@ class LocalizationPanel(QWidget):
         return group
 
     def _build_feedback_group(self) -> QGroupBox:
-        group = QGroupBox("控制反馈接口预留")
+        group = QGroupBox("雷达直线校准")
         layout = QVBoxLayout(group)
-        note = QLabel("控制反馈接口预留，默认不发送到底盘")
-        note.setStyleSheet("color: #b00020; font-weight: bold;")
-        layout.addWidget(note)
-        form = QFormLayout()
-        self._control_enabled_cb = QCheckBox("control_enabled")
-        self._control_enabled_cb.setChecked(False)
-        self._control_enabled_cb.toggled.connect(self._sync_control_state)
-        form.addRow("enable:", self._control_enabled_cb)
-        self._control_mode_combo = QComboBox()
-        for mode in ("monitor_only", "heading_assist", "lateral_assist", "radar_guided_assist"):
-            self._control_mode_combo.addItem(mode, mode)
-        self._control_mode_combo.currentIndexChanged.connect(self._sync_control_state)
-        form.addRow("control_mode:", self._control_mode_combo)
-        self._target_speed_spin = self._make_double_spin(-3.0, 3.0, 0.01)
-        self._target_yaw_spin = self._make_double_spin(-180.0, 180.0, 1.0)
-        self._correction_vx_spin = self._make_double_spin(-1.0, 1.0, 0.01)
-        self._correction_vz_spin = self._make_double_spin(-3.0, 3.0, 0.01)
-        for title, spin in (
-            ("target_speed:", self._target_speed_spin),
-            ("target_yaw_deg:", self._target_yaw_spin),
-            ("correction_vx:", self._correction_vx_spin),
-            ("correction_vz:", self._correction_vz_spin),
-        ):
-            spin.valueChanged.connect(self._sync_control_state)
-            form.addRow(title, spin)
-        self._safety_state_edit = QLineEdit("monitor_only")
-        self._safety_state_edit.textChanged.connect(self._sync_control_state)
-        form.addRow("safety_state:", self._safety_state_edit)
-        layout.addLayout(form)
+
+        launch_row = QHBoxLayout()
+        self._calibration_launch_start_btn = QPushButton("启动校准节点")
+        self._calibration_launch_start_btn.clicked.connect(self._start_calibration_launch)
+        launch_row.addWidget(self._calibration_launch_start_btn)
+        self._calibration_launch_stop_btn = QPushButton("停止校准节点")
+        self._calibration_launch_stop_btn.clicked.connect(self._stop_calibration_launch)
+        launch_row.addWidget(self._calibration_launch_stop_btn)
+        layout.addLayout(launch_row)
+
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("目标速度:"))
+        self._calibration_speed_spin = self._make_double_spin(0.0, 3.0, 0.05)
+        self._calibration_speed_spin.setValue(0.2)
+        speed_row.addWidget(self._calibration_speed_spin)
+        speed_row.addWidget(QLabel("m/s"))
+        speed_row.addStretch()
+        layout.addLayout(speed_row)
+
+        motion_row = QHBoxLayout()
+        self._calibration_forward_btn = QPushButton("前进")
+        self._calibration_forward_btn.clicked.connect(self._calibration_forward)
+        motion_row.addWidget(self._calibration_forward_btn)
+        self._calibration_backward_btn = QPushButton("后退")
+        self._calibration_backward_btn.clicked.connect(self._calibration_backward)
+        motion_row.addWidget(self._calibration_backward_btn)
+        self._calibration_stop_btn = QPushButton("停止")
+        self._calibration_stop_btn.clicked.connect(self._calibration_stop)
+        motion_row.addWidget(self._calibration_stop_btn)
+        layout.addLayout(motion_row)
+
+        self._calibration_status_label = QLabel("校准节点未运行")
+        layout.addWidget(self._calibration_status_label)
         return group
 
     def _add_value_row(self, form: QFormLayout, title: str, key: str) -> None:
@@ -333,27 +362,62 @@ class LocalizationPanel(QWidget):
         self._refresh_timer.timeout.connect(self._refresh_view)
         self._refresh_timer.start(100)
 
-    def _connect(self) -> None:
-        self._worker.open_bridge(
-            self._host_edit.text().strip() or "localhost",
-            self._port_spin.value(),
-            self._topic_edit.text().strip() or "/Odometry",
+    def _on_fastlio_topic_edited(self) -> None:
+        topic = self.fastlio_odometry_topic()
+        self.set_fastlio_odometry_topic(topic)
+        self.fastlio_topic_changed.emit(topic)
+
+    def fastlio_odometry_topic(self) -> str:
+        return normalize_ros_topic(self._topic_edit.text())
+
+    def set_fastlio_odometry_topic(self, topic: str) -> None:
+        blocker = QSignalBlocker(self._topic_edit)
+        self._topic_edit.setText(normalize_ros_topic(topic))
+        del blocker
+
+    def fastlio_subscription_enabled(self) -> bool:
+        return self._fastlio_subscription_cb.isChecked()
+
+    def set_fastlio_subscription_enabled(self, enabled: bool) -> None:
+        blocker = QSignalBlocker(self._fastlio_subscription_cb)
+        self._fastlio_subscription_cb.setChecked(bool(enabled))
+        del blocker
+
+    def _on_apply_fastlio_subscription(self) -> None:
+        self.fastlio_subscription_apply_requested.emit(
+            self.fastlio_subscription_enabled()
         )
 
-    def _on_connection_changed(self, connected: bool) -> None:
+    def set_fastlio_subscription_applied(self, enabled: bool) -> None:
+        state = "等待数据" if enabled else "已停用"
+        self._online_label.setText(f"{self.fastlio_odometry_topic()}: {state}")
+
+    def set_shared_ros_connected(self, connected: bool) -> None:
         self._set_connected(connected)
 
+    def accept_localization_sample(self, sample: LocalizationSample) -> None:
+        self._on_sample(sample)
+
     def _set_connected(self, connected: bool) -> None:
-        self._connect_btn.setEnabled(not connected)
-        self._disconnect_btn.setEnabled(connected)
-        self._host_edit.setEnabled(not connected)
-        self._port_spin.setEnabled(not connected)
-        self._topic_edit.setEnabled(not connected)
-        self._fastlio_launch_start_btn.setEnabled(connected)
-        self._fastlio_launch_stop_btn.setEnabled(connected)
-        self._lidar_launch_start_btn.setEnabled(connected)
-        self._lidar_launch_stop_btn.setEnabled(connected)
-        self._connection_label.setText("已连接" if connected else "未连接")
+        self._launch_buttons_connected = connected
+        if not connected:
+            if self._calibration_motion_active:
+                self.line_follow_control_requested.emit(0.0, False, False)
+            self._fastlio_running = False
+            self._fastlio_stop_pending = False
+            self._lidar_running = False
+            self._lidar_stop_pending = False
+            self._calibration_running = False
+            self._calibration_motion_active = False
+            self._calibration_start_pending = False
+            self._calibration_stop_pending = False
+        self._connect_btn.setEnabled(False)
+        self._disconnect_btn.setEnabled(False)
+        self._host_edit.setEnabled(False)
+        self._port_spin.setEnabled(False)
+        self._topic_edit.setEnabled(True)
+        self._update_launch_buttons()
+        self._update_calibration_buttons()
         self._connection_label.setStyleSheet("color: green;" if connected else "color: red;")
 
     def _on_sample(self, sample: LocalizationSample) -> None:
@@ -366,28 +430,173 @@ class LocalizationPanel(QWidget):
         self._connection_label.setStyleSheet("color: red;")
 
     def _start_fastlio_launch(self) -> None:
-        self._worker.publish_launch_manager_command("start fastlio fast_lio mapping_c16.launch")
+        self._fastlio_running = True
+        self._fastlio_stop_pending = False
+        self._update_launch_buttons()
+        self.launch_manager_command_requested.emit(
+            "start fastlio fast_lio mapping_c16.launch"
+        )
         self.set_fastlio_launch_status("FAST-LIO 启动命令已发送")
+        self.status_query_requested.emit()
 
     def _stop_fastlio_launch(self) -> None:
-        self._worker.publish_launch_manager_command("stop fastlio")
+        self._fastlio_stop_pending = True
+        self._update_launch_buttons()
+        self.launch_manager_command_requested.emit("stop fastlio")
         self.set_fastlio_launch_status("FAST-LIO 停止命令已发送")
+        self.status_query_requested.emit()
 
     def set_fastlio_launch_status(self, text: str, *, error: bool = False) -> None:
         self._fastlio_launch_label.setText(text)
         self._fastlio_launch_label.setStyleSheet("color: red;" if error else "color: green;")
 
     def _start_lidar_launch(self) -> None:
-        self._worker.publish_launch_manager_command("start lidar turn_on_wheeltec_robot wheeltec_lidar.launch")
+        self._lidar_running = True
+        self._lidar_stop_pending = False
+        self._update_launch_buttons()
+        self.launch_manager_command_requested.emit(
+            "start lidar turn_on_wheeltec_robot wheeltec_lidar.launch"
+        )
         self.set_lidar_launch_status("雷达节点启动命令已发送")
+        self.status_query_requested.emit()
 
     def _stop_lidar_launch(self) -> None:
-        self._worker.publish_launch_manager_command("stop lidar")
+        self._lidar_stop_pending = True
+        self._update_launch_buttons()
+        self.launch_manager_command_requested.emit("stop lidar")
         self.set_lidar_launch_status("雷达节点停止命令已发送")
+        self.status_query_requested.emit()
 
     def set_lidar_launch_status(self, text: str, *, error: bool = False) -> None:
         self._lidar_launch_label.setText(text)
         self._lidar_launch_label.setStyleSheet("color: red;" if error else "color: green;")
+
+    def _start_calibration_launch(self) -> None:
+        self._calibration_start_pending = True
+        self._calibration_stop_pending = False
+        self._update_calibration_buttons()
+        command = (
+            "restart pid_control simple_follower pid_control_lidar_assisted.launch "
+            f"imu_topic:=/active_imu lidar_odom_topic:={self.fastlio_odometry_topic()}"
+        )
+        self.launch_manager_command_requested.emit(command)
+        self._calibration_status_label.setText("校准节点启动命令已发送")
+        self.status_query_requested.emit()
+
+    def _stop_calibration_launch(self) -> None:
+        self._calibration_stop()
+        self._calibration_stop_pending = True
+        self._calibration_start_pending = False
+        self._update_calibration_buttons()
+        self.launch_manager_command_requested.emit("stop pid_control")
+        self._calibration_status_label.setText("校准节点停止命令已发送")
+        self.status_query_requested.emit()
+
+    def _calibration_forward(self) -> None:
+        if not self._calibration_running:
+            return
+        self._calibration_motion_active = True
+        self.line_follow_control_requested.emit(
+            self._calibration_speed_spin.value(),
+            True,
+            False,
+        )
+
+    def _calibration_backward(self) -> None:
+        if not self._calibration_running:
+            return
+        self._calibration_motion_active = True
+        self.line_follow_control_requested.emit(
+            self._calibration_speed_spin.value(),
+            False,
+            True,
+        )
+
+    def _calibration_stop(self) -> None:
+        if not self._calibration_running and not self._calibration_motion_active:
+            return
+        self._calibration_motion_active = False
+        self.line_follow_control_requested.emit(0.0, False, False)
+
+    def update_launch_manager_status(self, status) -> None:
+        data = status.get("data", status) if isinstance(status, dict) else {}
+        running = set(data.get("running") or []) if isinstance(data, dict) else set()
+        raw_detail = data.get("detail", {}) if isinstance(data, dict) else {}
+        detail = raw_detail if isinstance(raw_detail, dict) else {}
+
+        self._fastlio_running = "fastlio" in running
+        self._fastlio_stop_pending = False
+        self._lidar_running = "lidar" in running
+        self._lidar_stop_pending = False
+        pid_detail = detail.get("pid_control", {})
+        self._calibration_running = (
+            "pid_control" in running
+            and "pid_control_lidar_assisted.launch" in self._launch_detail_text(pid_detail)
+        )
+        self._calibration_start_pending = False
+        self._calibration_stop_pending = False
+        if not self._calibration_running:
+            self._calibration_motion_active = False
+        self._update_launch_buttons()
+        self._update_calibration_buttons()
+        self.set_fastlio_launch_status(
+            self._launch_status_text("FAST-LIO", self._fastlio_running, detail.get("fastlio", {})),
+            error=not self._fastlio_running,
+        )
+        self.set_lidar_launch_status(
+            self._launch_status_text("雷达节点", self._lidar_running, detail.get("lidar", {})),
+            error=not self._lidar_running,
+        )
+        calibration_state = "运行中" if self._calibration_running else "未运行"
+        calibration_detail = self._launch_detail_text(pid_detail)
+        suffix = f": {calibration_detail}" if calibration_detail else ""
+        self._calibration_status_label.setText(f"校准节点{calibration_state}{suffix}")
+
+    def _update_launch_buttons(self) -> None:
+        connected = self._launch_buttons_connected
+        self._fastlio_launch_start_btn.setEnabled(
+            connected and not self._fastlio_running and not self._fastlio_stop_pending
+        )
+        self._fastlio_launch_stop_btn.setEnabled(
+            connected and self._fastlio_running and not self._fastlio_stop_pending
+        )
+        self._lidar_launch_start_btn.setEnabled(
+            connected and not self._lidar_running and not self._lidar_stop_pending
+        )
+        self._lidar_launch_stop_btn.setEnabled(
+            connected and self._lidar_running and not self._lidar_stop_pending
+        )
+
+    def _update_calibration_buttons(self) -> None:
+        connected = self._launch_buttons_connected
+        pending = self._calibration_start_pending or self._calibration_stop_pending
+        self._calibration_launch_start_btn.setEnabled(
+            connected and not self._calibration_running and not pending
+        )
+        self._calibration_launch_stop_btn.setEnabled(
+            connected and self._calibration_running and not pending
+        )
+        motion_enabled = connected and self._calibration_running and not pending
+        self._calibration_forward_btn.setEnabled(motion_enabled)
+        self._calibration_backward_btn.setEnabled(motion_enabled)
+        self._calibration_stop_btn.setEnabled(motion_enabled)
+
+    def _launch_status_text(self, label: str, running: bool, detail) -> str:
+        state = "运行中" if running else "未运行"
+        detail_text = self._launch_detail_text(detail)
+        if detail_text:
+            return f"{label} {state}: {detail_text}"
+        return f"{label} {state}"
+
+    def _launch_detail_text(self, detail) -> str:
+        if not isinstance(detail, dict):
+            return ""
+        parts: list[str] = []
+        if detail.get("package"):
+            parts.append(str(detail["package"]))
+        if detail.get("launch"):
+            parts.append(str(detail["launch"]))
+        return " ".join(parts)
 
     def _refresh_view(self) -> None:
         latest = self._buffer.latest()
@@ -598,8 +807,8 @@ class LocalizationPanel(QWidget):
         return Path(tempfile.gettempdir()) / "debug_monitor_frozen_maps"
 
     def shutdown(self) -> None:
+        self._calibration_stop()
         self._refresh_timer.stop()
-        self._worker.close_bridge()
 
     def sizeHint(self) -> QSize:
         return QSize(1000, 560)
