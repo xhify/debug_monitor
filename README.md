@@ -2,7 +2,7 @@
 
 实时电机调试上位机软件，通过串口接收 100Hz 数据流，可视化绘图并支持 PID、速度限制、USART1 目标速度和目标 PWM 在线调整，并显示 AFC 增量输出。
 
-**完整操作手册：** [docs/User_Guide.md](docs/User_Guide.md)。手册按当前界面覆盖汇总、编码器、IMU、ROS、ROS IMU、ROSBag 和定位精度模块。
+**操作手册：** [docs/User_Guide.md](docs/User_Guide.md)。从 ROS 连接入手，按 IMU＋里程计直行、激光雷达建图与雷达辅助直行两种使用场景说明操作，并附其他模块速查。
 
 ---
 
