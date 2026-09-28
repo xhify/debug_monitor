@@ -2,6 +2,8 @@
 
 实时电机调试上位机软件，通过串口接收 100Hz 数据流，可视化绘图并支持 PID、速度限制、USART1 目标速度和目标 PWM 在线调整，并显示 AFC 增量输出。
 
+**完整操作手册：** [docs/User_Guide.md](docs/User_Guide.md)。手册按当前界面覆盖汇总、编码器、IMU、ROS、ROS IMU、ROSBag 和定位精度模块。
+
 ---
 
 ## 1. 环境准备
@@ -364,7 +366,7 @@ debug_monitor/
 
 ROS CSV 的 `session_elapsed_s` 由消息实际 `recv_time_epoch_s - recording_start_epoch_s` 计算得到，而不是由写入 CSV 的时刻计算。边界外 ROS 消息会被丢弃，并在 `session.json` 中累计 `dropped_pre_start_ros_messages` / `dropped_post_stop_ros_messages`。非 ROS 数据（例如雷达 `.bin`）使用 `session_elapsed_s` 与 ROS 数据做近似对齐。
 
-默认情况下所有可记录源保持勾选。串口/ROS 的设备来源下拉框只影响对应设备面板和元数据，勾选的 ROS topic 会独立记录：`/odom` 写入 `ros_odom.csv`，`/imu` 写入 `ros_imu.csv`，`/active_imu` 写入 `ros_active_imu.csv`。这些兼容 CSV 保留旧列顺序，并在末尾追加 `ros_time`、`recv_time`、`frame_id`。
+当前界面初始化时所有可记录源均未勾选，需要按本次实验选择。串口/ROS 的设备来源下拉框只影响对应设备面板和元数据，勾选的 ROS topic 会独立记录：`/odom` 写入 `ros_odom.csv`，`/imu` 写入 `ros_imu.csv`，`/active_imu` 写入 `ros_active_imu.csv`。这些兼容 CSV 保留旧列顺序，并在末尾追加 `ros_time`、`recv_time`、`frame_id`。
 
 轨迹主 topic 由汇总页“轨迹主话题”配置统一决定，用于检查、录制和对齐。轨迹数据稳定输出为 `trajectory_odometry.csv`；当主 topic 为默认 `/Odometry` 时，同时保留 legacy `fastlio_odometry.csv`。
 
